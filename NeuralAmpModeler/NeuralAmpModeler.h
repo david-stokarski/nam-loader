@@ -348,4 +348,10 @@ private:
   bool mMetroPrevOn = false;
   double mMetroPhaseSamples = 0.0; // samples remaining until the next beat
   int mClickPos = -1; // position within the current click (-1 = idle)
+
+  // --- Window size (draw scale) persistence --------------------------------
+  float mSavedWindowScale = 1.0f; // scale to open at (loaded from prefs)
+  float mLastSavedScale = 1.0f; // last value written to the prefs file
+  float mPendingScale = -1.0f; // scale under observation for debouncing
+  int mScaleStableCount = 0; // idle ticks the scale has held steady
 };

@@ -114,6 +114,38 @@ void _SaveAmpStylePref(int v)
   if (f.is_open())
     f << v;
 }
+
+// The window scale (from the corner resizer) is remembered the same way, so the
+// plugin/standalone reopens at the size the user last left it.
+void _WindowScalePrefPath(WDL_String& path)
+{
+  iplug::AppSupportPath(path, false);
+  path.Append("/NeuralAmpModeler");
+  std::error_code ec;
+  std::filesystem::create_directories(path.Get(), ec);
+  path.Append("/window_scale.txt");
+}
+
+float _LoadWindowScalePref()
+{
+  WDL_String path;
+  _WindowScalePrefPath(path);
+  std::ifstream f(path.Get());
+  if (!f.is_open())
+    return -1.0f;
+  float v = -1.0f;
+  f >> v;
+  return f.fail() ? -1.0f : v;
+}
+
+void _SaveWindowScalePref(float v)
+{
+  WDL_String path;
+  _WindowScalePrefPath(path);
+  std::ofstream f(path.Get(), std::ios::trunc);
+  if (f.is_open())
+    f << v;
+}
 } // namespace
 
 
@@ -146,6 +178,13 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
       GetParam(kAmpType)->Set((double)savedAmp);
   }
 
+  // Restore the last window scale so we reopen at the size the user left.
+  {
+    const float s = _LoadWindowScalePref();
+    mSavedWindowScale = (s >= 0.25f && s <= 4.0f) ? s : 1.0f;
+    mLastSavedScale = mSavedWindowScale;
+  }
+
   mNoiseGateTrigger.AddListener(&mNoiseGateGain);
 
   mMakeGraphicsFunc = [&]() {
@@ -153,7 +192,7 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
 #ifdef OS_IOS
     auto scaleFactor = GetScaleForScreen(PLUG_WIDTH, PLUG_HEIGHT) * 0.85f;
 #else
-    auto scaleFactor = 1.0f;
+    auto scaleFactor = mSavedWindowScale;
 #endif
 
     return MakeGraphics(*this, PLUG_WIDTH, PLUG_HEIGHT, PLUG_FPS, scaleFactor);
@@ -629,6 +668,28 @@ void NeuralAmpModeler::OnIdle()
 {
   mInputSender.TransmitData(*this);
   mOutputSender.TransmitData(*this);
+
+  // Persist the window scale once it settles after a resize (debounced so we
+  // don't hit the disk on every frame of a drag).
+  if (auto* pGraphics = GetUI())
+  {
+    const float s = pGraphics->GetDrawScale();
+    if (s == mPendingScale)
+    {
+      if (mScaleStableCount < 1000000)
+        mScaleStableCount++;
+    }
+    else
+    {
+      mPendingScale = s;
+      mScaleStableCount = 0;
+    }
+    if (mScaleStableCount == 8 && std::fabs(s - mLastSavedScale) > 0.001f)
+    {
+      _SaveWindowScalePref(s);
+      mLastSavedScale = s;
+    }
+  }
 
   if (mTunerActive.load(std::memory_order_relaxed))
   {
