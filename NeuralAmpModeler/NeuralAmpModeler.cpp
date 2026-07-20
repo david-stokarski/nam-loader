@@ -25,22 +25,22 @@ const double kDCBlockerFrequency = 5.0;
 // Styles
 const IVColorSpec colorSpec{
   DEFAULT_BGCOLOR, // Background
-  PluginColors::NAM_THEMECOLOR, // Foreground
-  PluginColors::NAM_THEMECOLOR.WithOpacity(0.3f), // Pressed
-  PluginColors::NAM_THEMECOLOR.WithOpacity(0.4f), // Frame
+  PluginColors::ACCENT, // Foreground
+  PluginColors::ACCENT.WithOpacity(0.3f), // Pressed
+  PluginColors::PANEL_BORDER, // Frame
   PluginColors::MOUSEOVER, // Highlight
   DEFAULT_SHCOLOR, // Shadow
-  PluginColors::NAM_THEMECOLOR, // Extra 1
+  PluginColors::ACCENT, // Extra 1
   COLOR_RED, // Extra 2 --> color for clipping in meters
-  PluginColors::NAM_THEMECOLOR.WithContrast(0.1f), // Extra 3
+  PluginColors::ACCENT_DIM, // Extra 3
 };
 
 const IVStyle style =
   IVStyle{true, // Show label
           true, // Show value
           colorSpec,
-          {DEFAULT_TEXT_SIZE + 3.f, EVAlign::Middle, PluginColors::NAM_THEMEFONTCOLOR}, // Knob label text5
-          {DEFAULT_TEXT_SIZE + 3.f, EVAlign::Bottom, PluginColors::NAM_THEMEFONTCOLOR}, // Knob value text
+          IText(11.f, PluginColors::TEXT_MID, "Michroma-Regular").WithVAlign(EVAlign::Middle), // Knob label text
+          IText(12.f, PluginColors::TEXT_HI, "Roboto-Regular").WithVAlign(EVAlign::Bottom), // Knob value text
           DEFAULT_HIDE_CURSOR,
           DEFAULT_DRAW_FRAME,
           false,
@@ -50,8 +50,10 @@ const IVStyle style =
           DEFAULT_SHADOW_OFFSET,
           DEFAULT_WIDGET_FRAC,
           DEFAULT_WIDGET_ANGLE};
-const IVStyle titleStyle =
-  DEFAULT_STYLE.WithValueText(IText(30, COLOR_WHITE, "Michroma-Regular")).WithDrawFrame(false).WithShadowOffset(2.f);
+// Wordmark shown in the top toolbar
+const IVStyle titleStyle = DEFAULT_STYLE.WithValueText(IText(15.f, PluginColors::TEXT_HI, "Michroma-Regular"))
+                             .WithDrawFrame(false)
+                             .WithShadowOffset(0.f);
 const IVStyle radioButtonStyle =
   style
     .WithColor(EVColor::kON, PluginColors::NAM_THEMECOLOR) // Pressed buttons and their labels
@@ -94,6 +96,7 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
   GetParam(kInputCalibrationLevel)
     ->InitDouble(kInputCalibrationLevelParamName.c_str(), kDefaultInputCalibrationLevel, -60.0, 60.0, 0.1, "dBu");
   GetParam(kSlim)->InitDouble("Slim", 0.0, 0.0, 1.0, 0.01);
+  GetParam(kAmpType)->InitEnum("AmpType", 1, {"Low Gain", "Medium Gain", "Modern Gain"});
 
   mNoiseGateTrigger.AddListener(&mNoiseGateGain);
 
@@ -132,54 +135,71 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     const auto backgroundBitmap = pGraphics->LoadBitmap(BACKGROUND_FN);
     const auto fileBackgroundBitmap = pGraphics->LoadBitmap(FILEBACKGROUND_FN);
     const auto inputLevelBackgroundBitmap = pGraphics->LoadBitmap(INPUTLEVELBACKGROUND_FN);
-    const auto linesBitmap = pGraphics->LoadBitmap(LINES_FN);
     const auto knobBackgroundBitmap = pGraphics->LoadBitmap(KNOBBACKGROUND_FN);
     const auto switchHandleBitmap = pGraphics->LoadBitmap(SLIDESWITCHHANDLE_FN);
     const auto meterBackgroundBitmap = pGraphics->LoadBitmap(METERBACKGROUND_FN);
+    const auto ampBaseBitmap = pGraphics->LoadBitmap(AMPBASE_FN);
+    const auto modernBaseBitmap = pGraphics->LoadBitmap(MODERNBASE_FN);
+    const auto lowBaseBitmap = pGraphics->LoadBitmap(LOWBASE_FN);
+    const auto knobImgBitmap = pGraphics->LoadBitmap(KNOBIMG_FN);
 
     const auto b = pGraphics->GetBounds();
-    const auto mainArea = b.GetPadded(-20);
-    const auto contentArea = mainArea.GetPadded(-10);
-    const auto titleHeight = 50.0f;
-    const auto titleArea = contentArea.GetFromTop(titleHeight);
 
-    // Areas for knobs
-    const auto knobsPad = 20.0f;
-    const auto knobsExtraSpaceBelowTitle = 25.0f;
-    const auto singleKnobPad = -2.0f;
-    const auto knobsArea = contentArea.GetFromTop(NAM_KNOB_HEIGHT)
-                             .GetReducedFromLeft(knobsPad)
-                             .GetReducedFromRight(knobsPad)
-                             .GetVShifted(titleHeight + knobsExtraSpaceBelowTitle);
-    const auto inputKnobArea = knobsArea.GetGridCell(0, kInputLevel, 1, numKnobs).GetPadded(-singleKnobPad);
-    const auto noiseGateArea = knobsArea.GetGridCell(0, kNoiseGateThreshold, 1, numKnobs).GetPadded(-singleKnobPad);
-    const auto bassKnobArea = knobsArea.GetGridCell(0, kToneBass, 1, numKnobs).GetPadded(-singleKnobPad);
-    const auto midKnobArea = knobsArea.GetGridCell(0, kToneMid, 1, numKnobs).GetPadded(-singleKnobPad);
-    const auto trebleKnobArea = knobsArea.GetGridCell(0, kToneTreble, 1, numKnobs).GetPadded(-singleKnobPad);
-    const auto outputKnobArea = knobsArea.GetGridCell(0, kOutputLevel, 1, numKnobs).GetPadded(-singleKnobPad);
+    // --- Layout: a compact header strip, then the amp faceplate fills the body.
+    const float headerH = 44.0f;
+    const auto headerArea = b.GetFromTop(headerH);
+    const auto bodyArea = b.GetReducedFromTop(headerH); // amp art is drawn here
 
-    const auto ngToggleArea =
-      noiseGateArea.GetVShifted(noiseGateArea.H()).SubRectVertical(2, 0).GetReducedFromTop(10.0f);
-    const auto eqToggleArea = midKnobArea.GetVShifted(midKnobArea.H()).SubRectVertical(2, 0).GetReducedFromTop(10.0f);
+    // Header contents (left -> right)
+    const auto titleArea = IRECT(b.L + 14.f, headerArea.T, b.L + 180.f, headerArea.B);
+    const float tMid = headerArea.MH();
+    const auto modelArea = IRECT(b.L + 192.f, tMid - 13.f, b.L + 460.f, tMid + 13.f);
+    const auto irArea = IRECT(b.L + 470.f, tMid - 13.f, b.R - 64.f, tMid + 13.f);
+    const auto slimIconArea = IRECT(b.R - 54.f, tMid - 8.f, b.R - 38.f, tMid + 8.f);
+    const auto settingsButtonArea = headerArea.GetFromRight(30.0f).GetCentredInside(16.0f, 16.0f);
 
-    // Areas for model and IR
-    const auto fileWidth = 200.0f;
-    const auto fileHeight = 30.0f;
-    const auto irYOffset = 38.0f;
-    const auto modelArea =
-      contentArea.GetFromBottom((2.0f * fileHeight)).GetFromTop(fileHeight).GetMidHPadded(fileWidth).GetVShifted(-1);
-    const auto slimIconArea =
-      IRECT(modelArea.R + 6.f, modelArea.MH() - 14.f, modelArea.R + 6.f + 2.f * 28.f, modelArea.MH() + 14.f);
-    const auto modelIconArea = modelArea.GetFromLeft(30).GetTranslated(-40, 10);
-    const auto irArea = modelArea.GetVShifted(irYOffset);
-    const auto irSwitchArea = irArea.GetFromLeft(30.0f).GetHShifted(-40.0f).GetScaledAboutCentre(0.6f);
+    // Amp faceplate knob overlay positions (normalized to the 1536x1024 art).
+    auto knobRect = [&](float nx, float ny, float diam) {
+      const float cx = bodyArea.L + nx * bodyArea.W();
+      const float cy = bodyArea.T + ny * bodyArea.H();
+      return IRECT(cx - diam * 0.5f, cy - diam * 0.5f, cx + diam * 0.5f, cy + diam * 0.5f);
+    };
+    // Medium-gain faceplate now has knobs baked into the art; overlay indicators only.
+    // Centers measured from the white dots the artist placed on each knob.
+    const float knobDiam = 0.050f * bodyArea.W();
+    const auto inputKnobArea = knobRect(0.3105f, 0.5312f, knobDiam);
+    const auto noiseGateArea = knobRect(0.3913f, 0.5308f, knobDiam);
+    const auto bassKnobArea = knobRect(0.4691f, 0.5308f, knobDiam);
+    const auto midKnobArea = knobRect(0.5488f, 0.5312f, knobDiam);
+    const auto trebleKnobArea = knobRect(0.6315f, 0.5308f, knobDiam);
+    const auto outputKnobArea = knobRect(0.7148f, 0.5312f, knobDiam);
 
-    // Areas for meters
-    const auto inputMeterArea = contentArea.GetFromLeft(30).GetHShifted(-20).GetMidVPadded(100).GetVShifted(-25);
-    const auto outputMeterArea = contentArea.GetFromRight(30).GetHShifted(20).GetMidVPadded(100).GetVShifted(-25);
+    // Modern-gain faceplate: knobs are baked into the art; overlay indicators only.
+    const float modKnobDiam = 0.048f * bodyArea.W();
+    const float modKnobY = 0.5537f;
+    const auto modInputArea = knobRect(0.2305f, modKnobY, modKnobDiam);
+    const auto modGateArea = knobRect(0.3021f, modKnobY, modKnobDiam);
+    const auto modBassArea = knobRect(0.3737f, modKnobY, modKnobDiam);
+    const auto modMidArea = knobRect(0.4414f, modKnobY, modKnobDiam);
+    const auto modTrebleArea = knobRect(0.5130f, modKnobY, modKnobDiam);
+    const auto modOutputArea = knobRect(0.5846f, modKnobY, modKnobDiam);
 
-    // Misc Areas
-    const auto settingsButtonArea = CornerButtonArea(b);
+    // Low-gain faceplate: knobs baked into the art; overlay indicators only.
+    const float lowKnobDiam = 0.058f * bodyArea.W();
+    const float lowKnobY = 0.5273f;
+    const auto lowInputArea = knobRect(0.2637f, lowKnobY, lowKnobDiam);
+    const auto lowGateArea = knobRect(0.3568f, lowKnobY, lowKnobDiam);
+    const auto lowBassArea = knobRect(0.4460f, lowKnobY, lowKnobDiam);
+    const auto lowMidArea = knobRect(0.5352f, lowKnobY, lowKnobDiam);
+    const auto lowTrebleArea = knobRect(0.6224f, lowKnobY, lowKnobDiam);
+    const auto lowOutputArea = knobRect(0.7116f, lowKnobY, lowKnobDiam);
+
+    // Input / output meters — slim vertical bars in the margins, set off from the amp.
+    const float meterW = 5.0f;
+    const float meterTop = bodyArea.T + 0.22f * bodyArea.H();
+    const float meterBot = bodyArea.T + 0.60f * bodyArea.H();
+    const auto inputMeterArea = IRECT(bodyArea.L + 4.5f, meterTop, bodyArea.L + 4.5f + meterW, meterBot);
+    const auto outputMeterArea = IRECT(bodyArea.R - 4.5f - meterW, meterTop, bodyArea.R - 4.5f, meterBot);
 
     // Model loader button
     auto loadModelCompletionHandler = [&](const WDL_String& fileName, const WDL_String& path) {
@@ -215,10 +235,20 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
       }
     };
 
-    pGraphics->AttachBackground(BACKGROUND_FN);
-    pGraphics->AttachControl(new IBitmapControl(b, linesBitmap));
-    pGraphics->AttachControl(new IVLabelControl(titleArea, "NEURAL AMP MODELER", titleStyle));
-    pGraphics->AttachControl(new ISVGControl(modelIconArea, modelIconSVG));
+    // --- Background + header strip + amp faceplate art ------------------
+    // Solid canvas (header color) shows through the transparent amp PNG.
+    const int ampType = GetParam(kAmpType)->Int();
+    pGraphics->AttachControl(new NAMBackgroundControl(b));
+    pGraphics->AttachControl(new NAMStripControl(headerArea, true)); // dark strip + bottom hairline
+    // Both faceplates attached; only the selected amp's is shown.
+    pGraphics->AttachControl(new NAMImageControl(bodyArea, lowBaseBitmap), kCtrlTagLowBase)->Hide(ampType != 0);
+    pGraphics->AttachControl(new NAMImageControl(bodyArea, ampBaseBitmap), kCtrlTagMedBase)->Hide(ampType != 1);
+    pGraphics->AttachControl(new NAMImageControl(bodyArea, modernBaseBitmap), kCtrlTagModBase)->Hide(ampType != 2);
+
+    // Title
+    pGraphics->AttachControl(new IVLabelControl(
+      titleArea, "Stokarski NAM",
+      titleStyle.WithValueText(IText(12.0f, PluginColors::TEXT_HI, "Michroma-Regular").WithAlign(EAlign::Near))));
 
 #ifdef NAM_PICK_DIRECTORY
     const std::string defaultNamFileString = "Select model directory...";
@@ -229,11 +259,18 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
 #endif
     // Getting started page listing additional resources
     const char* const getUrl = "https://www.neuralampmodeler.com/users#comp-marb84o5";
+
+    // Model + IR selection as compact dropdowns in the header
     pGraphics->AttachControl(
       new NAMFileBrowserControl(modelArea, kMsgTagClearModel, defaultNamFileString.c_str(), "nam",
                                 loadModelCompletionHandler, style, fileSVG, crossSVG, leftArrowSVG, rightArrowSVG,
-                                fileBackgroundBitmap, globeSVG, "Get NAM Models", getUrl),
+                                fileBackgroundBitmap, globeSVG, "Get NAM Models", getUrl, /* compact */ true),
       kCtrlTagModelFileBrowser);
+    pGraphics->AttachControl(
+      new NAMFileBrowserControl(irArea, kMsgTagClearIR, defaultIRString.c_str(), "wav", loadIRCompletionHandler, style,
+                                fileSVG, crossSVG, leftArrowSVG, rightArrowSVG, fileBackgroundBitmap, globeSVG,
+                                "Get IRs", getUrl, /* compact */ true),
+      kCtrlTagIRFileBrowser);
 
     auto hideSlimOverlay = [](IControl* pCaller) {
       IGraphics* ui = pCaller->GetUI();
@@ -258,28 +295,32 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
       ->SetAnimationEndActionFunction(showSlimOverlay)
       ->Hide(true);
 
-    pGraphics->AttachControl(new ISVGSwitchControl(irSwitchArea, {irIconOffSVG, irIconOnSVG}, kIRToggle));
-    pGraphics->AttachControl(
-      new NAMFileBrowserControl(irArea, kMsgTagClearIR, defaultIRString.c_str(), "wav", loadIRCompletionHandler, style,
-                                fileSVG, crossSVG, leftArrowSVG, rightArrowSVG, fileBackgroundBitmap, globeSVG,
-                                "Get IRs", getUrl),
-      kCtrlTagIRFileBrowser);
-    pGraphics->AttachControl(
-      new NAMSwitchControl(ngToggleArea, kNoiseGateActive, "Noise Gate", style, switchHandleBitmap));
-    pGraphics->AttachControl(new NAMSwitchControl(eqToggleArea, kEQActive, "EQ", style, switchHandleBitmap));
+    // Medium-gain knobs — indicator only (knob artwork is baked into the faceplate).
+    const int medParams[6] = {kInputLevel, kNoiseGateThreshold, kToneBass, kToneMid, kToneTreble, kOutputLevel};
+    const IRECT medAreas[6] = {inputKnobArea, noiseGateArea, bassKnobArea, midKnobArea, trebleKnobArea, outputKnobArea};
+    for (int i = 0; i < 6; i++)
+      pGraphics
+        ->AttachControl(new NAMImageKnobControl(medAreas[i], medParams[i], knobImgBitmap, false, 0.10f, 0.62f), -1,
+                        "AMP_MED")
+        ->Hide(ampType != 1);
 
-    // The knobs
-    pGraphics->AttachControl(new NAMKnobControl(inputKnobArea, kInputLevel, "", style, knobBackgroundBitmap));
-    pGraphics->AttachControl(new NAMKnobControl(noiseGateArea, kNoiseGateThreshold, "", style, knobBackgroundBitmap));
-    pGraphics->AttachControl(
-      new NAMKnobControl(bassKnobArea, kToneBass, "", style, knobBackgroundBitmap), -1, "EQ_KNOBS");
-    pGraphics->AttachControl(
-      new NAMKnobControl(midKnobArea, kToneMid, "", style, knobBackgroundBitmap), -1, "EQ_KNOBS");
-    pGraphics->AttachControl(
-      new NAMKnobControl(trebleKnobArea, kToneTreble, "", style, knobBackgroundBitmap), -1, "EQ_KNOBS");
-    pGraphics->AttachControl(new NAMKnobControl(outputKnobArea, kOutputLevel, "", style, knobBackgroundBitmap));
+    // Modern-gain knobs — indicator only (knob artwork is baked into the faceplate).
+    const IRECT modAreas[6] = {modInputArea, modGateArea, modBassArea, modMidArea, modTrebleArea, modOutputArea};
+    for (int i = 0; i < 6; i++)
+      pGraphics
+        ->AttachControl(new NAMImageKnobControl(modAreas[i], medParams[i], knobImgBitmap, false, 0.10f, 0.62f), -1,
+                        "AMP_MOD")
+        ->Hide(ampType != 2);
 
-    // The meters
+    // Low-gain knobs — indicator only (knob artwork is baked into the faceplate).
+    const IRECT lowAreas[6] = {lowInputArea, lowGateArea, lowBassArea, lowMidArea, lowTrebleArea, lowOutputArea};
+    for (int i = 0; i < 6; i++)
+      pGraphics
+        ->AttachControl(new NAMImageKnobControl(lowAreas[i], medParams[i], knobImgBitmap, false, 0.10f, 0.62f), -1,
+                        "AMP_LOW")
+        ->Hide(ampType != 0);
+
+    // Input / output level meters flanking the amp
     pGraphics->AttachControl(new NAMMeterControl(inputMeterArea, meterBackgroundBitmap, style), kCtrlTagInputMeter);
     pGraphics->AttachControl(new NAMMeterControl(outputMeterArea, meterBackgroundBitmap, style), kCtrlTagOutputMeter);
 
@@ -336,8 +377,9 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
   // Input is collapsed to mono in preparation for the NAM.
   _ProcessInput(inputs, numFrames, numChannelsExternalIn, numChannelsInternal);
   _ApplyDSPStaging();
-  const bool noiseGateActive = GetParam(kNoiseGateActive)->Value();
-  const bool toneStackActive = GetParam(kEQActive)->Value();
+  // Gate and tone stack are always on (their UI toggles were removed).
+  const bool noiseGateActive = true;
+  const bool toneStackActive = true;
 
   // Noise gate trigger
   sample** triggerOutput = mInputPointers;
@@ -534,11 +576,23 @@ void NeuralAmpModeler::OnParamChangeUI(int paramIdx, EParamSource source)
 
     switch (paramIdx)
     {
-      case kNoiseGateActive: pGraphics->GetControlWithParamIdx(kNoiseGateThreshold)->SetDisabled(!active); break;
-      case kEQActive:
-        pGraphics->ForControlInGroup("EQ_KNOBS", [active](IControl* pControl) { pControl->SetDisabled(!active); });
-        break;
+      // Gate and EQ are always on now; their toggles were removed.
       case kIRToggle: pGraphics->GetControlWithTag(kCtrlTagIRFileBrowser)->SetDisabled(!active); break;
+      case kAmpType:
+      {
+        const int type = GetParam(kAmpType)->Int();
+        if (auto* c = pGraphics->GetControlWithTag(kCtrlTagLowBase))
+          c->Hide(type != 0);
+        if (auto* c = pGraphics->GetControlWithTag(kCtrlTagMedBase))
+          c->Hide(type != 1);
+        if (auto* c = pGraphics->GetControlWithTag(kCtrlTagModBase))
+          c->Hide(type != 2);
+        pGraphics->ForControlInGroup("AMP_LOW", [type](IControl* pControl) { pControl->Hide(type != 0); });
+        pGraphics->ForControlInGroup("AMP_MED", [type](IControl* pControl) { pControl->Hide(type != 1); });
+        pGraphics->ForControlInGroup("AMP_MOD", [type](IControl* pControl) { pControl->Hide(type != 2); });
+        pGraphics->SetAllControlsDirty();
+        break;
+      }
       default: break;
     }
   }

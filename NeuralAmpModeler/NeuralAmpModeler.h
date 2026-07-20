@@ -47,6 +47,7 @@ enum EParams
   kInputCalibrationLevel,
   kOutputMode,
   kSlim,
+  kAmpType,
   kNumParams
 };
 
@@ -65,6 +66,10 @@ enum ECtrlTags
   kCtrlTagSlimmableIcon,
   kCtrlTagSlimOverlayBackdrop,
   kCtrlTagSlimKnob,
+  kCtrlTagAmpType,
+  kCtrlTagMedBase,
+  kCtrlTagModBase,
+  kCtrlTagLowBase,
   kNumCtrlTags
 };
 

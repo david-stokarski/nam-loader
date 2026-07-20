@@ -1,4 +1,4 @@
-#define PLUG_NAME "NeuralAmpModeler"
+#define PLUG_NAME "NAM Loader"
 #define PLUG_MFR "Steven Atkinson"
 #define PLUG_VERSION_HEX 0x0000070f
 #define PLUG_VERSION_STR "0.7.15"
@@ -27,8 +27,8 @@
 #define PLUG_DOES_MPE 0
 #define PLUG_DOES_STATE_CHUNKS 0
 #define PLUG_HAS_UI 1
-#define PLUG_WIDTH 600
-#define PLUG_HEIGHT 400
+#define PLUG_WIDTH 800
+#define PLUG_HEIGHT 577
 #define PLUG_FPS 60
 #define PLUG_SHARED_RESOURCES 0
 #define PLUG_HOST_RESIZE 0
@@ -74,6 +74,10 @@
 #define BACKGROUND2X_FN "Background@2x.jpg"
 #define BACKGROUND3X_FN "Background@3x.jpg"
 #define KNOBBACKGROUND_FN "KnobBackground.png"
+#define AMPBASE_FN "AmpBase.png"
+#define MODERNBASE_FN "ModernBase.png"
+#define LOWBASE_FN "LowBase.png"
+#define KNOBIMG_FN "KnobImg.png"
 #define KNOBBACKGROUND2X_FN "KnobBackground@2x.png"
 #define KNOBBACKGROUND3X_FN "KnobBackground@3x.png"
 #define FILEBACKGROUND_FN "FileBackground.png"

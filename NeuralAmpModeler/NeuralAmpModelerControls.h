@@ -1,11 +1,13 @@
 #pragma once
 
+#include <algorithm> // std::min
 #include <cmath> // std::round
 #include <cstdio> // FILE, fclose
 #include <sstream> // std::stringstream
 #include <unordered_map> // std::unordered_map
 #include "IControls.h"
 #include "IPlugPaths.h"
+#include "Colors.h"
 
 #ifdef OS_WIN
   #include <Windows.h>
@@ -31,6 +33,115 @@ IRECT CornerButtonArea(const IRECT& rect)
 {
   const auto mainArea = rect.GetPadded(-20);
   return mainArea.GetFromTRHC(50, 50).GetCentredInside(20, 20);
+};
+
+/// Full-window background: a soft vertical gradient with a subtle vignette.
+class NAMBackgroundControl : public IControl
+{
+public:
+  NAMBackgroundControl(const IRECT& bounds)
+  : IControl(bounds)
+  {
+    mIgnoreMouse = true;
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    // Flat, solid canvas matching the header chrome. The amp faceplate PNG has a
+    // transparent background, so this color shows through behind it.
+    g.FillRect(PluginColors::CHROME, mRECT);
+  }
+};
+
+/// A flat, minimally-rounded panel: a subtly-lifted fill and a single hairline
+/// border. No shadow, no highlight — clean and modern.
+class NAMPanelControl : public IControl
+{
+public:
+  NAMPanelControl(const IRECT& bounds, float roundness = 4.f)
+  : IControl(bounds)
+  , mRoundness(roundness)
+  {
+    mIgnoreMouse = true;
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    g.FillRoundRect(PluginColors::PANEL, mRECT, mRoundness);
+    g.DrawRoundRect(PluginColors::PANEL_BORDER, mRECT, mRoundness, &mBlend, 1.f);
+  }
+
+private:
+  float mRoundness;
+};
+
+/// A flat chrome strip (top toolbar / bottom status bar) with a hairline on one edge.
+class NAMStripControl : public IControl
+{
+public:
+  NAMStripControl(const IRECT& bounds, bool hairlineOnBottom)
+  : IControl(bounds)
+  , mHairlineOnBottom(hairlineOnBottom)
+  {
+    mIgnoreMouse = true;
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    g.FillRect(PluginColors::CHROME, mRECT);
+    const IRECT line = mHairlineOnBottom ? mRECT.GetFromBottom(1.f) : mRECT.GetFromTop(1.f);
+    g.FillRect(PluginColors::HAIRLINE, line);
+  }
+
+private:
+  bool mHairlineOnBottom;
+};
+
+/// A thin vertical hairline used as a divider between control groups.
+class NAMDividerControl : public IControl
+{
+public:
+  NAMDividerControl(const IRECT& bounds)
+  : IControl(bounds)
+  {
+    mIgnoreMouse = true;
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    const float x = mRECT.MW();
+    g.PathClear();
+    g.DrawLine(PluginColors::HAIRLINE, x, mRECT.T, x, mRECT.B, &mBlend, 1.f);
+  }
+};
+
+/// A small glowing LED dot (purely decorative "active" indicator).
+class NAMLEDControl : public IControl
+{
+public:
+  NAMLEDControl(const IRECT& bounds, const IColor& color)
+  : IControl(bounds)
+  , mColor(color)
+  {
+    mIgnoreMouse = true;
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    const float cx = mRECT.MW(), cy = mRECT.MH();
+    const float r = std::min(mRECT.W(), mRECT.H()) * 0.5f;
+    // Glow
+    g.PathClear();
+    g.PathCircle(cx, cy, r * 2.2f);
+    g.PathFill(IPattern::CreateRadialGradient(
+      cx, cy, r * 2.2f, {{mColor.WithOpacity(0.45f), 0.f}, {COLOR_TRANSPARENT, 1.f}}));
+    // Core
+    g.FillCircle(mColor, cx, cy, r);
+    g.FillCircle(COLOR_WHITE.WithOpacity(0.5f), cx - r * 0.25f, cy - r * 0.25f, r * 0.35f);
+  }
+
+private:
+  IColor mColor;
 };
 
 class NAMSquareButtonControl : public ISVGButtonControl
@@ -89,6 +200,91 @@ private:
   IActionFunction mDismiss;
 };
 
+/// Draws a bitmap scaled to fit its bounds (used for the amp faceplate art).
+class NAMImageControl : public IControl, public IBitmapBase
+{
+public:
+  NAMImageControl(const IRECT& bounds, const IBitmap& bitmap)
+  : IControl(bounds)
+  , IBitmapBase(bitmap)
+  {
+    mIgnoreMouse = true;
+  }
+
+  void OnRescale() override
+  {
+    if (mBitmap.IsValid())
+      mBitmap = GetUI()->GetScaledBitmap(mBitmap);
+  }
+
+  void Draw(IGraphics& g) override { g.DrawFittedBitmap(mBitmap, mRECT); }
+};
+
+/// A knob rendered from a photorealistic bitmap that is rotated to indicate the
+/// value. The source image's pointer sits at 6 o'clock, so a 180 degree offset
+/// is applied. The bitmap is scaled to fill mRECT so it tracks UI resizing.
+class NAMImageKnobControl : public IKnobControlBase, public IBitmapBase
+{
+public:
+  // drawKnob: draw the knob bitmap (medium amp). When false, only the indicator
+  // is drawn — used when the knob artwork is already baked into the faceplate.
+  // indInner/indOuter: indicator length as a fraction of the control radius.
+  NAMImageKnobControl(const IRECT& bounds, int paramIdx, const IBitmap& bitmap, bool drawKnob = true,
+                      float indInner = 0.16f, float indOuter = 0.52f)
+  : IKnobControlBase(bounds, paramIdx)
+  , IBitmapBase(bitmap)
+  , mDrawKnob(drawKnob)
+  , mIndInner(indInner)
+  , mIndOuter(indOuter)
+  {
+  }
+
+  void OnRescale() override
+  {
+    if (mBitmap.IsValid())
+      mBitmap = GetUI()->GetScaledBitmap(mBitmap);
+  }
+
+  // Reverse the scroll-wheel direction over the knob.
+  void OnMouseWheel(float x, float y, const IMouseMod& mod, float d) override
+  {
+    IKnobControlBase::OnMouseWheel(x, y, mod, -d);
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    const float cx = mRECT.MW();
+    const float cy = mRECT.MH();
+    const float R = mRECT.W() * 0.5f;
+
+    // 1) Knob artwork, drawn static (no rotation), scaled to fill mRECT.
+    if (mDrawKnob && mBitmap.IsValid())
+    {
+      const float w = mBitmap.W() / mBitmap.GetDrawScale();
+      const float h = mBitmap.H() / mBitmap.GetDrawScale();
+      const float s = mRECT.W() / w;
+      g.PathTransformSave();
+      g.PathTransformTranslate(cx, cy);
+      g.PathTransformScale(s);
+      g.DrawBitmap(mBitmap, IRECT(-w * 0.5f, -h * 0.5f, w * 0.5f, h * 0.5f), 0, 0, &mBlend);
+      g.PathTransformRestore();
+    }
+
+    // 2) Indicator rendered on top, rotated to the value (-135..+135, 0 = up).
+    const float angle = -135.0f + static_cast<float>(GetValue()) * 270.0f;
+    const float ri = R * mIndInner;
+    const float ro = R * mIndOuter;
+    const float tk = std::max(1.6f, R * 0.075f);
+    // Dark under-stroke for contrast, then a bright pointer.
+    g.DrawRadialLine(COLOR_BLACK.WithOpacity(0.55f), cx, cy, angle, ri, ro, &mBlend, tk + 1.4f);
+    g.DrawRadialLine(IColor(255, 246, 244, 235), cx, cy, angle, ri, ro, &mBlend, tk);
+  }
+
+private:
+  bool mDrawKnob;
+  float mIndInner, mIndOuter;
+};
+
 class NAMKnobControl : public IVKnobControl, public IBitmapBase
 {
 public:
@@ -99,111 +295,87 @@ public:
     mInnerPointerFrac = 0.55;
   }
 
-  void OnRescale() override { mBitmap = GetUI()->GetScaledBitmap(mBitmap); }
+  void OnRescale() override
+  {
+    if (mBitmap.IsValid())
+      mBitmap = GetUI()->GetScaledBitmap(mBitmap);
+  }
 
+  // Reverse the scroll-wheel direction over the knob.
+  void OnMouseWheel(float x, float y, const IMouseMod& mod, float d) override
+  {
+    IKnobControlBase::OnMouseWheel(x, y, mod, -d);
+  }
+
+  // A flat, modern knob: a thin indicator arc, a subtly-lit dark face and a
+  // clean pointer line. No skeuomorphic bitmap.
   void DrawWidget(IGraphics& g) override
   {
-    float widgetRadius = GetRadius() * 0.73;
-    auto knobRect = mWidgetBounds.GetCentredInside(mWidgetBounds.W(), mWidgetBounds.W());
-    const float cx = knobRect.MW(), cy = knobRect.MH();
+    const float d = std::min(mWidgetBounds.W(), mWidgetBounds.H());
+    const IRECT knobRect = mWidgetBounds.GetCentredInside(d, d);
+    const float cx = knobRect.MW();
+    const float cy = knobRect.MH();
+    const float r = d * 0.5f;
+    const bool hover = mMouseIsOver;
+
     const float angle = mAngle1 + (static_cast<float>(GetValue()) * (mAngle2 - mAngle1));
-    DrawIndicatorTrack(g, angle, cx + 0.5, cy, widgetRadius);
-    g.DrawFittedBitmap(mBitmap, knobRect);
-    float data[2][2];
-    RadialPoints(angle, cx, cy, mInnerPointerFrac * widgetRadius, mInnerPointerFrac * widgetRadius, 2, data);
-    g.PathCircle(data[1][0], data[1][1], 3);
-    g.PathFill(IPattern::CreateRadialGradient(data[1][0], data[1][1], 4.0f,
-                                              {{GetColor(mMouseIsOver ? kX3 : kX1), 0.f},
-                                               {GetColor(mMouseIsOver ? kX3 : kX1), 0.8f},
-                                               {COLOR_TRANSPARENT, 1.0f}}),
-               {}, &mBlend);
-    g.DrawCircle(COLOR_BLACK.WithOpacity(0.5f), data[1][0], data[1][1], 3, &mBlend);
+
+    // Indicator arc — thin full track then the filled value portion.
+    const float arcR = r * 0.95f;
+    const float arcThickness = 2.0f;
+    g.DrawArc(PluginColors::ARC_TRACK, cx, cy, arcR, mAngle1, mAngle2, &mBlend, arcThickness);
+    const IColor arcColor = hover ? PluginColors::ACCENT : PluginColors::ACCENT.WithOpacity(0.85f);
+    g.DrawArc(arcColor, cx, cy, arcR, angle >= mAnchorAngle ? mAnchorAngle : angle,
+              angle >= mAnchorAngle ? angle : mAnchorAngle, &mBlend, arcThickness);
+
+    // Body — flat, single fill with a hairline rim. No gradient, no shadow.
+    const float bodyR = r * 0.76f;
+    g.FillCircle(PluginColors::KNOB_FACE_BOTTOM, cx, cy, bodyR, &mBlend);
+    g.DrawCircle(PluginColors::KNOB_RIM, cx, cy, bodyR, &mBlend, 1.f);
+
+    // Pointer line
+    const IColor pointer = hover ? PluginColors::ACCENT : PluginColors::TEXT_HI;
+    g.DrawRadialLine(pointer, cx, cy, angle, bodyR * 0.34f, bodyR * 0.82f, &mBlend, 2.0f);
   }
 };
 
-class NAMSwitchControl : public IVSlideSwitchControl, public IBitmapBase
+/// A clean, modern pill toggle: a rounded capsule track with a sliding knob.
+/// Draws no text (so nothing can clip), and toggles the bound bool parameter on
+/// click via ISwitchControlBase.
+class NAMSwitchControl : public ISwitchControlBase
 {
 public:
-  NAMSwitchControl(const IRECT& bounds, int paramIdx, const char* label, const IVStyle& style, IBitmap bitmap)
-  : IVSlideSwitchControl(bounds, paramIdx, label,
-                         style.WithRoundness(0.666f)
-                           .WithShowValue(false)
-                           .WithEmboss(true)
-                           .WithShadowOffset(1.5f)
-                           .WithDrawShadows(false)
-                           .WithColor(kFR, COLOR_BLACK)
-                           .WithFrameThickness(0.5f)
-                           .WithWidgetFrac(0.5f)
-                           .WithLabelOrientation(EOrientation::South))
-  , IBitmapBase(bitmap)
+  NAMSwitchControl(const IRECT& bounds, int paramIdx)
+  : ISwitchControlBase(bounds, paramIdx)
   {
   }
 
-  void DrawWidget(IGraphics& g) override
+  void Draw(IGraphics& g) override
   {
-    DrawTrack(g, mWidgetBounds);
-    DrawHandle(g, mHandleBounds);
-  }
+    // Fit a capsule inside the bounds
+    const float h = std::min(mRECT.H(), 20.0f);
+    const float w = std::min(mRECT.W(), h * 1.9f);
+    const IRECT track = mRECT.GetCentredInside(w, h);
+    const float r = h * 0.5f;
+    const bool on = GetSelectedIdx() > 0;
+    const float alpha = mDisabled ? 0.4f : 1.0f;
 
-  void DrawTrack(IGraphics& g, const IRECT& bounds) override
-  {
-    IRECT handleBounds = GetAdjustedHandleBounds(bounds);
-    handleBounds = IRECT(handleBounds.L, handleBounds.T, handleBounds.R, handleBounds.T + mBitmap.H());
-    IRECT centreBounds = handleBounds.GetPadded(-mStyle.shadowOffset);
-    IRECT shadowBounds = handleBounds.GetTranslated(mStyle.shadowOffset, mStyle.shadowOffset);
-    //    const float contrast = mDisabled ? -GRAYED_ALPHA : 0.f;
-    float cR = 7.f;
-    const float tlr = cR;
-    const float trr = cR;
-    const float blr = cR;
-    const float brr = cR;
+    // Track
+    const IColor trackCol =
+      on ? PluginColors::ACCENT_DIM.WithOpacity(alpha) : PluginColors::KNOB_RIM.WithOpacity(alpha);
+    g.FillRoundRect(trackCol, track, r, &mBlend);
+    if (!on)
+      g.DrawRoundRect(PluginColors::PANEL_BORDER.WithOpacity(alpha), track, r, &mBlend, 1.0f);
+    if (mMouseIsOver && !mDisabled)
+      g.FillRoundRect(PluginColors::MOUSEOVER, track, r, &mBlend);
 
-    // outer shadow
-    if (mStyle.drawShadows)
-      g.FillRoundRect(GetColor(kSH), shadowBounds, tlr, trr, blr, brr, &mBlend);
-
-    // Embossed style unpressed
-    if (mStyle.emboss)
-    {
-      // Positive light
-      g.FillRoundRect(GetColor(kPR), handleBounds, tlr, trr, blr, brr /*, &blend*/);
-
-      // Negative light
-      g.FillRoundRect(GetColor(kSH), shadowBounds, tlr, trr, blr, brr /*, &blend*/);
-
-      // Fill in foreground
-      g.FillRoundRect(GetValue() > 0.5 ? GetColor(kX1) : COLOR_BLACK, centreBounds, tlr, trr, blr, brr, &mBlend);
-
-      // Shade when hovered
-      if (mMouseIsOver)
-        g.FillRoundRect(GetColor(kHL), centreBounds, tlr, trr, blr, brr, &mBlend);
-    }
-    else
-    {
-      g.FillRoundRect(GetValue() > 0.5 ? GetColor(kX1) : COLOR_BLACK, handleBounds, tlr, trr, blr, brr /*, &blend*/);
-
-      // Shade when hovered
-      if (mMouseIsOver)
-        g.FillRoundRect(GetColor(kHL), handleBounds, tlr, trr, blr, brr, &mBlend);
-    }
-
-    if (mStyle.drawFrame)
-      g.DrawRoundRect(GetColor(kFR), handleBounds, tlr, trr, blr, brr, &mBlend, mStyle.frameThickness);
-  }
-
-  void DrawHandle(IGraphics& g, const IRECT& filledArea) override
-  {
-    IRECT r;
-    if (GetSelectedIdx() == 0)
-    {
-      r = filledArea.GetFromLeft(mBitmap.W());
-    }
-    else
-    {
-      r = filledArea.GetFromRight(mBitmap.W());
-    }
-
-    g.DrawBitmap(mBitmap, r, 0, 0, nullptr);
+    // Knob
+    const float knobR = r - 2.5f;
+    const float cy = track.MH();
+    const float cx = on ? (track.R - r) : (track.L + r);
+    const IColor knobCol =
+      on ? PluginColors::TEXT_HI.WithOpacity(alpha) : PluginColors::TEXT_MID.WithOpacity(alpha);
+    g.FillCircle(knobCol, cx, cy, knobR, &mBlend);
   }
 };
 
@@ -267,7 +439,8 @@ public:
   NAMFileBrowserControl(const IRECT& bounds, int clearMsgTag, const char* labelStr, const char* fileExtension,
                         IFileDialogCompletionHandlerFunc ch, const IVStyle& style, const ISVG& loadSVG,
                         const ISVG& clearSVG, const ISVG& leftSVG, const ISVG& rightSVG, const IBitmap& bitmap,
-                        const ISVG& globeSVG, const char* getButtonLabel, const char* getButtonURL)
+                        const ISVG& globeSVG, const char* getButtonLabel, const char* getButtonURL,
+                        bool compact = false)
   : IDirBrowseControlBase(bounds, fileExtension, false, false)
   , mClearMsgTag(clearMsgTag)
   , mDefaultLabelStr(labelStr)
@@ -282,11 +455,26 @@ public:
   , mGetButtonLabel(getButtonLabel)
   , mGetButtonURL(getButtonURL)
   , mBrowserState(NAMBrowserState::Empty)
+  , mCompact(compact)
   {
     mIgnoreMouse = true;
   }
 
-  void Draw(IGraphics& g) override { g.DrawFittedBitmap(mBitmap, mRECT); }
+  void Draw(IGraphics& g) override
+  {
+    // Flat field.
+    g.FillRoundRect(PluginColors::KNOB_RIM, mRECT, 4.0f);
+    g.DrawRoundRect(PluginColors::PANEL_BORDER, mRECT, 4.0f, &mBlend, 1.0f);
+
+    if (mCompact)
+    {
+      // Draw a small chevron on the right to read as a dropdown.
+      const float cx = mRECT.R - 13.f;
+      const float cy = mRECT.MH();
+      g.DrawLine(PluginColors::TEXT_MID, cx - 4.f, cy - 2.f, cx, cy + 2.5f, &mBlend, 1.4f);
+      g.DrawLine(PluginColors::TEXT_MID, cx + 4.f, cy - 2.f, cx, cy + 2.5f, &mBlend, 1.4f);
+    }
+  }
 
   void OnPopupMenuSelection(IPopupMenu* pSelectedMenu, int valIdx) override
   {
@@ -383,6 +571,19 @@ public:
       }
     };
 
+    if (mCompact)
+    {
+      // Dropdown style: just the file-name field (click = load or choose),
+      // with room for a chevron on the right. No load/prev/next/clear/get icons.
+      const IRECT padded = mRECT.GetPadded(-3.f).GetReducedFromLeft(6.f).GetReducedFromRight(20.f);
+      AddChildControl(mFileNameControl = new NAMFileNameControl(padded, mDefaultLabelStr.Get(), mStyle))
+        ->SetAnimationEndActionFunction(chooseFileFunc);
+      mClearButton = nullptr;
+      mGetButton = nullptr;
+      SetBrowserState(NAMBrowserState::Empty);
+      return;
+    }
+
     IRECT padded = mRECT.GetPadded(-6.f).GetHPadded(-2.f);
     const auto buttonWidth = padded.H();
     const auto loadFileButtonBounds = padded.ReduceFromLeft(buttonWidth);
@@ -470,6 +671,9 @@ private:
   {
     mBrowserState = newState;
 
+    if (mClearButton == nullptr || mGetButton == nullptr)
+      return; // compact/dropdown mode has no clear/get buttons
+
     switch (mBrowserState)
     {
       case NAMBrowserState::Empty:
@@ -497,6 +701,7 @@ private:
   NAMBrowserState mBrowserState;
   NAMSquareButtonControl* mClearButton = nullptr;
   NAMGetButtonControl* mGetButton = nullptr;
+  bool mCompact = false;
 };
 
 class NAMMeterControl : public IVPeakAvgMeterControl<>, public IBitmapBase
@@ -506,7 +711,7 @@ class NAMMeterControl : public IVPeakAvgMeterControl<>, public IBitmapBase
 
 public:
   NAMMeterControl(const IRECT& bounds, const IBitmap& bitmap, const IVStyle& style)
-  : IVPeakAvgMeterControl<>(bounds, "", style.WithShowValue(false).WithDrawFrame(false).WithWidgetFrac(0.8),
+  : IVPeakAvgMeterControl<>(bounds, "", style.WithShowValue(false).WithDrawFrame(false).WithWidgetFrac(1.0f),
                             EDirection::Vertical, {}, 0, KMeterMin, KMeterMax, {})
   , IBitmapBase(bitmap)
   {
@@ -518,24 +723,28 @@ public:
   virtual void OnResize() override
   {
     SetTargetRECT(MakeRects(mRECT));
-    mWidgetBounds = mWidgetBounds.GetMidHPadded(5).GetVPadded(10);
+    // Fill the whole bounds — no extra top/bottom or side padding.
+    mWidgetBounds = mRECT;
     MakeTrackRects(mWidgetBounds);
     MakeStepRects(mWidgetBounds, mNSteps);
     SetDirty(false);
   }
 
-  void DrawBackground(IGraphics& g, const IRECT& r) override { g.DrawFittedBitmap(mBitmap, r); }
+  // Flat, borderless track: a slim rounded gray bar.
+  void DrawBackground(IGraphics& g, const IRECT& r) override
+  {
+    g.FillRoundRect(IColor(255, 52, 53, 58), r, r.W() * 0.5f);
+  }
 
   void DrawTrackHandle(IGraphics& g, const IRECT& r, int chIdx, bool aboveBaseValue) override
   {
-    if (r.H() > 2)
-      g.FillRect(GetColor(kX1), r, &mBlend);
+    if (r.H() > 1)
+      g.FillRoundRect(PluginColors::TEXT_HI, r, r.W() * 0.5f, &mBlend);
   }
 
   void DrawPeak(IGraphics& g, const IRECT& r, int chIdx, bool aboveBaseValue) override
   {
-    g.DrawGrid(COLOR_BLACK, mTrackBounds.Get()[chIdx], 10, 2);
-    g.FillRect(GetColor(kX3), r, &mBlend);
+    g.FillRect(COLOR_WHITE, r, &mBlend);
   }
 };
 
@@ -652,8 +861,7 @@ class OutputModeControl : public IVRadioButtonControl
 {
 public:
   OutputModeControl(const IRECT& bounds, int paramIdx, const IVStyle& style, float buttonSize)
-  : IVRadioButtonControl(
-      bounds, paramIdx, {}, "Output Mode", style, EVShape::Ellipse, EDirection::Vertical, buttonSize) {};
+  : IVRadioButtonControl(bounds, paramIdx, {}, "", style, EVShape::Ellipse, EDirection::Vertical, buttonSize) {};
 
   void SetNormalizedDisable(const bool disable)
   {
@@ -750,69 +958,133 @@ public:
     SetDirty(true);
   }
 
+  // The centered card. mRECT spans the whole window so the backdrop can dim
+  // everything behind and swallow clicks; the popover itself is this sub-rect.
+  IRECT PopoverRect() const { return GetRECT().GetCentredInside(kPopoverW, kPopoverH); }
+
+  void Draw(IGraphics& g) override
+  {
+    // Dim the window behind the popover (fades with the container's blend).
+    g.FillRect(COLOR_BLACK.WithOpacity(0.55f), mRECT, &mBlend);
+
+    const IRECT card = PopoverRect();
+    // Soft drop shadow, then the card fill + hairline border.
+    g.FillRoundRect(COLOR_BLACK.WithOpacity(0.30f), card.GetPadded(3.f).GetVShifted(5.f), 14.f, &mBlend);
+    g.FillRoundRect(PluginColors::PANEL, card, 14.f, &mBlend);
+    g.DrawRoundRect(PluginColors::PANEL_BORDER, card, 14.f, &mBlend, 1.f);
+
+    // Section dividers (kept in sync with the layout in OnAttached()).
+    const IRECT inner = card.GetPadded(-kPopoverPad);
+    const float dyTitle = inner.T + kTitleH + 9.f;
+    g.DrawLine(PluginColors::HAIRLINE, inner.L, dyTitle, inner.R, dyTitle, &mBlend, 1.f);
+    const float dyAbout = inner.B - kAboutH - 8.f;
+    g.DrawLine(PluginColors::HAIRLINE, inner.L, dyAbout, inner.R, dyAbout, &mBlend, 1.f);
+  }
+
+  void OnMouseDown(float x, float y, const IMouseMod& mod) override
+  {
+    // Clicking the dimmed area outside the card dismisses.
+    if (!PopoverRect().Contains(x, y))
+      HideAnimated(true);
+  }
+
   void OnAttached() override
   {
-    const float pad = 20.0f;
-    const IVStyle titleStyle = DEFAULT_STYLE.WithValueText(IText(30, COLOR_WHITE, "Michroma-Regular"))
-                                 .WithDrawFrame(false)
-                                 .WithShadowOffset(2.f);
-    const auto text = IText(DEFAULT_TEXT_SIZE, EAlign::Center, PluginColors::HELP_TEXT);
-    const auto leftText = text.WithAlign(EAlign::Near);
-    const auto style = mStyle.WithDrawFrame(false).WithValueText(text);
-    const IVStyle leftStyle = style.WithValueText(leftText);
+    const IRECT card = PopoverRect();
+    const IRECT inner = card.GetPadded(-kPopoverPad);
 
-    AddNamedChildControl(new IBitmapControl(GetRECT(), mBitmap), mControlNames.bitmap)->SetIgnoreMouse(true);
-    const auto titleArea = GetRECT().GetPadded(-(pad + 10.0f)).GetFromTop(50.0f);
-    AddNamedChildControl(new IVLabelControl(titleArea, "SETTINGS", titleStyle), mControlNames.title);
+    const auto bodyText = IText(DEFAULT_TEXT_SIZE, EAlign::Center, PluginColors::HELP_TEXT);
+    const auto leftText = bodyText.WithAlign(EAlign::Near);
+    const auto baseStyle = mStyle.WithDrawFrame(false).WithValueText(bodyText);
+    const IVStyle leftStyle = baseStyle.WithValueText(leftText);
+    // Radios get section headers of their own, so suppress the built-in group label.
+    const IVStyle radioStyle = mRadioButtonStyle.WithShowLabel(false);
 
-    // Attach input/output calibration controls
+    const IVStyle titleStyle =
+      DEFAULT_STYLE
+        .WithValueText(
+          IText(19.f, PluginColors::TEXT_HI, "Michroma-Regular").WithAlign(EAlign::Near).WithVAlign(EVAlign::Middle))
+        .WithDrawFrame(false)
+        .WithShadowOffset(0.f);
+    const IVStyle sectionStyle =
+      DEFAULT_STYLE.WithDrawFrame(false).WithValueText(
+        IText(10.f, PluginColors::TEXT_MID, "Michroma-Regular").WithAlign(EAlign::Near).WithVAlign(EVAlign::Middle));
+
+    auto sectionLabel = [&](const IRECT& r, const char* str) {
+      AddChildControl(new IVLabelControl(r, str, sectionStyle));
+    };
+
+    // --- Title bar + close button ---
+    const IRECT titleRow = inner.GetFromTop(kTitleH);
+    AddNamedChildControl(new IVLabelControl(titleRow, "Settings", titleStyle), mControlNames.title);
+    auto closeAction = [&](IControl* pCaller) {
+      static_cast<NAMSettingsPageControl*>(pCaller->GetParent())->HideAnimated(true);
+    };
+    AddNamedChildControl(
+      new NAMSquareButtonControl(titleRow.GetFromRight(20.f).GetCentredInside(18.f), closeAction, mCloseSVG),
+      mControlNames.close);
+
+    // Content sits below the title divider and above the About footer.
+    const IRECT content = inner.GetReducedFromTop(kTitleH + 18.f).GetReducedFromBottom(kAboutH + 16.f);
+    const float colGap = 28.f;
+    const float colW = (content.W() - colGap) * 0.5f;
+    const IRECT leftCol = content.GetFromLeft(colW);
+    const IRECT rightCol = content.GetFromRight(colW);
+
+    const float labelH = 14.f;
+    const float sectionGap = 22.f;
+
+    // --- Left column: input calibration + output mode ---
     {
-      const float height = NAM_KNOB_HEIGHT + NAM_SWTICH_HEIGHT + 10.0f;
-      const float width = titleArea.W();
-      const auto inputOutputArea = titleArea.GetFromBottom(height).GetTranslated(0.0f, height);
-      const auto inputArea = inputOutputArea.GetFromLeft(0.5f * width);
-      const auto outputArea = inputOutputArea.GetFromRight(0.5f * width);
+      float y = leftCol.T;
+      sectionLabel(IRECT(leftCol.L, y, leftCol.R, y + labelH), "INPUT CALIBRATION");
+      y += labelH + 6.f;
 
-      const float knobWidth = 87.0f; // HACK based on looking at the main page knobs.
-      const auto inputLevelArea =
-        inputArea.GetFromTop(NAM_KNOB_HEIGHT).GetFromBottom(25.0f).GetMidHPadded(0.5f * knobWidth);
-      const auto inputSwitchArea = inputArea.GetFromBottom(NAM_SWTICH_HEIGHT).GetMidHPadded(0.5f * knobWidth);
-
+      const IRECT fieldArea = IRECT(leftCol.L, y, leftCol.R, y + 28.f);
       auto* inputLevelControl = AddNamedChildControl(
-        new InputLevelControl(inputLevelArea, kInputCalibrationLevel, mInputLevelBackgroundBitmap, text),
+        new InputLevelControl(fieldArea, kInputCalibrationLevel, mInputLevelBackgroundBitmap, bodyText),
         mControlNames.inputCalibrationLevel, kCtrlTagInputCalibrationLevel);
       inputLevelControl->SetTooltip(
         "The analog level, in dBu RMS, that corresponds to digital level of 0 dBFS peak in the host as its signal "
         "enters this plugin.");
-      AddNamedChildControl(
-        new NAMSwitchControl(inputSwitchArea, kCalibrateInput, "Calibrate Input", mStyle, mSwitchBitmap),
-        mControlNames.calibrateInput, kCtrlTagCalibrateInput);
+      y += 28.f + 12.f;
 
-      // Same-ish height & width as input controls
-      const auto outputRadioArea = outputArea.GetFromBottom(
-        1.1f * (inputLevelArea.H() + inputSwitchArea.H())); // .GetMidHPadded(0.55f * knobWidth);
-      const float buttonSize = 10.0f;
+      const IRECT calRow = IRECT(leftCol.L, y, leftCol.R, y + 24.f);
+      AddChildControl(new IVLabelControl(calRow.GetReducedFromRight(52.f), "Calibrate Input", leftStyle));
+      AddNamedChildControl(new NAMSwitchControl(calRow.GetFromRight(46.f).GetCentredInside(46.f, 22.f), kCalibrateInput),
+                           mControlNames.calibrateInput, kCtrlTagCalibrateInput);
+      y += 24.f + sectionGap;
+
+      sectionLabel(IRECT(leftCol.L, y, leftCol.R, y + labelH), "OUTPUT MODE");
+      y += labelH + 6.f;
+      const IRECT outputRadioArea = IRECT(leftCol.L, y, leftCol.R, y + 90.f);
       auto* outputModeControl =
-        AddNamedChildControl(new OutputModeControl(outputRadioArea, kOutputMode, mRadioButtonStyle, buttonSize),
+        AddNamedChildControl(new OutputModeControl(outputRadioArea, kOutputMode, radioStyle, 9.f),
                              mControlNames.outputMode, kCtrlTagOutputMode);
       outputModeControl->SetTooltip(
         "How to adjust the level of the output.\nRaw=No adjustment.\nNormalized=Adjust the level so that all models "
         "are about the same loudness.\nCalibrated=Match the input's digital-analog calibration.");
     }
 
-    const float halfWidth = PLUG_WIDTH / 2.0f - pad;
-    const auto bottomArea = GetRECT().GetPadded(-pad).GetFromBottom(78.0f);
-    const float lineHeight = 15.0f;
-    const auto modelInfoArea = bottomArea.GetFromLeft(halfWidth).GetFromTop(4 * lineHeight);
-    const auto aboutArea = bottomArea.GetFromRight(halfWidth).GetFromTop(5 * lineHeight);
-    AddNamedChildControl(new ModelInfoControl(modelInfoArea, leftStyle), mControlNames.modelInfo);
-    AddNamedChildControl(new AboutControl(aboutArea, leftStyle, leftText), mControlNames.about);
+    // --- Right column: amp model + model info ---
+    {
+      float y = rightCol.T;
+      sectionLabel(IRECT(rightCol.L, y, rightCol.R, y + labelH), "AMP MODEL");
+      y += labelH + 6.f;
+      const IRECT ampArea = IRECT(rightCol.L, y, rightCol.R, y + 90.f);
+      auto* ampControl = AddNamedChildControl(
+        new IVRadioButtonControl(ampArea, kAmpType, {}, "", radioStyle, EVShape::Ellipse, EDirection::Vertical, 9.f),
+        "ampType", kCtrlTagAmpType);
+      ampControl->SetTooltip("Choose the amp's look. Medium Gain and Modern Gain use different faceplates.");
+      y += 90.f + sectionGap;
 
-    auto closeAction = [&](IControl* pCaller) {
-      static_cast<NAMSettingsPageControl*>(pCaller->GetParent())->HideAnimated(true);
-    };
-    AddNamedChildControl(
-      new NAMSquareButtonControl(CornerButtonArea(GetRECT()), closeAction, mCloseSVG), mControlNames.close);
+      const IRECT modelInfoArea = IRECT(rightCol.L, y, rightCol.R, y + 4 * 15.f);
+      AddNamedChildControl(new ModelInfoControl(modelInfoArea, leftStyle), mControlNames.modelInfo);
+    }
+
+    // --- Footer: about / credits ---
+    const IRECT aboutArea = inner.GetFromBottom(kAboutH);
+    AddNamedChildControl(new AboutControl(aboutArea, leftStyle, leftText), mControlNames.about);
 
     OnResize();
   }
@@ -833,6 +1105,13 @@ private:
   ISVG mCloseSVG;
   int mAnimationTime = 200;
   bool mWillHide = false;
+
+  // Popover geometry (the card is centered inside the full-window bounds).
+  static constexpr float kPopoverW = 500.f;
+  static constexpr float kPopoverH = 448.f;
+  static constexpr float kPopoverPad = 26.f;
+  static constexpr float kTitleH = 28.f;
+  static constexpr float kAboutH = 80.f;
 
   // Names for controls
   // Make sure that these are all unique and that you use them with AddNamedChildControl
