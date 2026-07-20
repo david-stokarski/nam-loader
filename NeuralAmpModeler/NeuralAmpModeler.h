@@ -10,6 +10,7 @@
 
 #include "Colors.h"
 #include "ToneStack.h"
+#include "Tuner.h"
 
 #include "IPlug_include_in_plug_hdr.h"
 #include "ISender.h"
@@ -48,6 +49,7 @@ enum EParams
   kOutputMode,
   kSlim,
   kAmpType,
+  kBPM,
   kNumParams
 };
 
@@ -70,6 +72,8 @@ enum ECtrlTags
   kCtrlTagMedBase,
   kCtrlTagModBase,
   kCtrlTagLowBase,
+  kCtrlTagTunerBox,
+  kCtrlTagFooterBPM,
   kNumCtrlTags
 };
 
@@ -79,6 +83,9 @@ enum EMsgTags
   kMsgTagClearModel = 0,
   kMsgTagClearIR,
   kMsgTagHighlightColor,
+  kMsgTagTunerActive, // payload: bool — tuner popover opened/closed
+  kMsgTagTunerMute, // payload: bool — mute output while tuning
+  kMsgTagMetronome, // payload: bool — metronome on/off
   // The following tags are from DSP -> UI
   kMsgTagLoadFailed,
   kMsgTagLoadedModel,
@@ -329,4 +336,16 @@ private:
   std::unordered_map<std::string, double> mNAMParams = {{"Input", 0.0}, {"Output", 0.0}};
 
   NAMSender mInputSender, mOutputSender;
+
+  // --- Tuner ---------------------------------------------------------------
+  PitchDetector mPitchDetector;
+  std::atomic<bool> mTunerActive{false}; // tuner popover is open
+  std::atomic<bool> mTunerMuted{false}; // mute output while tuning
+  std::atomic<float> mTunerFreqHz{-1.0f}; // latest detected pitch for the UI
+
+  // --- Metronome (audio-thread state, except the atomic toggle) ------------
+  std::atomic<bool> mMetronomeOn{false};
+  bool mMetroPrevOn = false;
+  double mMetroPhaseSamples = 0.0; // samples remaining until the next beat
+  int mClickPos = -1; // position within the current click (-1 = idle)
 };

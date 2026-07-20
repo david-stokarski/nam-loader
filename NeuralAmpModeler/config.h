@@ -28,7 +28,7 @@
 #define PLUG_DOES_STATE_CHUNKS 0
 #define PLUG_HAS_UI 1
 #define PLUG_WIDTH 800
-#define PLUG_HEIGHT 577
+#define PLUG_HEIGHT 607
 #define PLUG_FPS 60
 #define PLUG_SHARED_RESOURCES 0
 #define PLUG_HOST_RESIZE 0
@@ -73,6 +73,7 @@
 #define BACKGROUND_FN "Background.jpg"
 #define BACKGROUND2X_FN "Background@2x.jpg"
 #define BACKGROUND3X_FN "Background@3x.jpg"
+#define LOGO_FN "Logo.png"
 #define KNOBBACKGROUND_FN "KnobBackground.png"
 #define AMPBASE_FN "AmpBase.png"
 #define MODERNBASE_FN "ModernBase.png"
