@@ -1,8 +1,11 @@
 #include <algorithm> // std::clamp, std::min
+#include <chrono> // tap tempo timing
 #include <cmath> // pow
 #include <filesystem>
+#include <fstream> // amp-style preference file
 #include <iostream>
 #include <utility>
+#include <vector>
 
 #include "Colors.h"
 #include "../NeuralAmpModelerCore/NAM/activations.h"
@@ -76,6 +79,43 @@ const bool kDefaultCalibrateInput = false;
 const std::string kInputCalibrationLevelParamName = "InputCalibrationLevel";
 const double kDefaultInputCalibrationLevel = 12.0;
 
+// The chosen amp style is remembered globally in a small preferences file so it
+// persists across relaunches — the standalone app doesn't otherwise save plugin
+// state, and in a plugin host this just acts as the default (per-session state
+// still overrides it on load).
+namespace
+{
+void _AmpStylePrefPath(WDL_String& path)
+{
+  iplug::AppSupportPath(path, false);
+  path.Append("/NeuralAmpModeler");
+  std::error_code ec;
+  std::filesystem::create_directories(path.Get(), ec);
+  path.Append("/amp_style.txt");
+}
+
+int _LoadAmpStylePref()
+{
+  WDL_String path;
+  _AmpStylePrefPath(path);
+  std::ifstream f(path.Get());
+  if (!f.is_open())
+    return -1;
+  int v = -1;
+  f >> v;
+  return f.fail() ? -1 : v;
+}
+
+void _SaveAmpStylePref(int v)
+{
+  WDL_String path;
+  _AmpStylePrefPath(path);
+  std::ofstream f(path.Get(), std::ios::trunc);
+  if (f.is_open())
+    f << v;
+}
+} // namespace
+
 
 NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
 : Plugin(info, MakeConfig(kNumParams, kNumPresets))
@@ -97,6 +137,14 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     ->InitDouble(kInputCalibrationLevelParamName.c_str(), kDefaultInputCalibrationLevel, -60.0, 60.0, 0.1, "dBu");
   GetParam(kSlim)->InitDouble("Slim", 0.0, 0.0, 1.0, 0.01);
   GetParam(kAmpType)->InitEnum("AmpType", 1, {"Low Gain", "Medium Gain", "Modern Gain"});
+  GetParam(kBPM)->InitDouble("Tempo", 120.0, 20.0, 300.0, 1.0, "BPM");
+
+  // Restore the last-chosen amp style (see the preference helpers above).
+  {
+    const int savedAmp = _LoadAmpStylePref();
+    if (savedAmp >= 0 && savedAmp < GetParam(kAmpType)->NDisplayTexts())
+      GetParam(kAmpType)->Set((double)savedAmp);
+  }
 
   mNoiseGateTrigger.AddListener(&mNoiseGateGain);
 
@@ -121,7 +169,6 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     pGraphics->LoadFont("Roboto-Regular", ROBOTO_FN);
     pGraphics->LoadFont("Michroma-Regular", MICHROMA_FN);
 
-    const auto gearSVG = pGraphics->LoadSVG(GEAR_FN);
     const auto fileSVG = pGraphics->LoadSVG(FILE_FN);
     const auto globeSVG = pGraphics->LoadSVG(GLOBE_ICON_FN);
     const auto crossSVG = pGraphics->LoadSVG(CLOSE_BUTTON_FN);
@@ -142,21 +189,28 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     const auto modernBaseBitmap = pGraphics->LoadBitmap(MODERNBASE_FN);
     const auto lowBaseBitmap = pGraphics->LoadBitmap(LOWBASE_FN);
     const auto knobImgBitmap = pGraphics->LoadBitmap(KNOBIMG_FN);
+    const auto logoBitmap = pGraphics->LoadBitmap(LOGO_FN);
 
     const auto b = pGraphics->GetBounds();
 
-    // --- Layout: a compact header strip, then the amp faceplate fills the body.
+    // --- Layout: a compact header strip, the amp faceplate body, and a footer.
     const float headerH = 44.0f;
+    const float footerH = 30.0f;
     const auto headerArea = b.GetFromTop(headerH);
-    const auto bodyArea = b.GetReducedFromTop(headerH); // amp art is drawn here
+    const auto footerArea = b.GetFromBottom(footerH);
+    const auto bodyArea = b.GetReducedFromTop(headerH).GetReducedFromBottom(footerH); // amp art is drawn here
 
-    // Header contents (left -> right)
-    const auto titleArea = IRECT(b.L + 14.f, headerArea.T, b.L + 180.f, headerArea.B);
+    // Header contents (left -> right): brand logo, divider, model + IR selectors.
     const float tMid = headerArea.MH();
-    const auto modelArea = IRECT(b.L + 192.f, tMid - 13.f, b.L + 460.f, tMid + 13.f);
-    const auto irArea = IRECT(b.L + 470.f, tMid - 13.f, b.R - 64.f, tMid + 13.f);
+    const auto logoArea = IRECT(b.L + 14.f, tMid - 14.f, b.L + 42.f, tMid + 14.f);
+    const auto headerDivider = IRECT(b.L + 52.f, headerArea.T + 11.f, b.L + 55.f, headerArea.B - 11.f);
+    const float selL = b.L + 68.f;
+    const float selR = b.R - 64.f;
+    const float selGap = 14.f;
+    const float selW = (selR - selL - selGap) * 0.5f;
+    const auto modelArea = IRECT(selL, tMid - 13.f, selL + selW, tMid + 13.f);
+    const auto irArea = IRECT(selL + selW + selGap, tMid - 13.f, selR, tMid + 13.f);
     const auto slimIconArea = IRECT(b.R - 54.f, tMid - 8.f, b.R - 38.f, tMid + 8.f);
-    const auto settingsButtonArea = headerArea.GetFromRight(30.0f).GetCentredInside(16.0f, 16.0f);
 
     // Amp faceplate knob overlay positions (normalized to the 1536x1024 art).
     auto knobRect = [&](float nx, float ny, float diam) {
@@ -245,10 +299,9 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     pGraphics->AttachControl(new NAMImageControl(bodyArea, ampBaseBitmap), kCtrlTagMedBase)->Hide(ampType != 1);
     pGraphics->AttachControl(new NAMImageControl(bodyArea, modernBaseBitmap), kCtrlTagModBase)->Hide(ampType != 2);
 
-    // Title
-    pGraphics->AttachControl(new IVLabelControl(
-      titleArea, "Stokarski NAM",
-      titleStyle.WithValueText(IText(12.0f, PluginColors::TEXT_HI, "Michroma-Regular").WithAlign(EAlign::Near))));
+    // Brand logo (top-left) + a hairline divider before the selectors.
+    pGraphics->AttachControl(new NAMImageControl(logoArea, logoBitmap));
+    pGraphics->AttachControl(new NAMDividerControl(headerDivider));
 
 #ifdef NAM_PICK_DIRECTORY
     const std::string defaultNamFileString = "Select model directory...";
@@ -264,12 +317,13 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     pGraphics->AttachControl(
       new NAMFileBrowserControl(modelArea, kMsgTagClearModel, defaultNamFileString.c_str(), "nam",
                                 loadModelCompletionHandler, style, fileSVG, crossSVG, leftArrowSVG, rightArrowSVG,
-                                fileBackgroundBitmap, globeSVG, "Get NAM Models", getUrl, /* compact */ true),
+                                fileBackgroundBitmap, globeSVG, modelIconSVG, "Get NAM Models", getUrl,
+                                /* compact */ true),
       kCtrlTagModelFileBrowser);
     pGraphics->AttachControl(
       new NAMFileBrowserControl(irArea, kMsgTagClearIR, defaultIRString.c_str(), "wav", loadIRCompletionHandler, style,
                                 fileSVG, crossSVG, leftArrowSVG, rightArrowSVG, fileBackgroundBitmap, globeSVG,
-                                "Get IRs", getUrl, /* compact */ true),
+                                irIconOnSVG, "Get IRs", getUrl, /* compact */ true),
       kCtrlTagIRFileBrowser);
 
     auto hideSlimOverlay = [](IControl* pCaller) {
@@ -324,19 +378,78 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     pGraphics->AttachControl(new NAMMeterControl(inputMeterArea, meterBackgroundBitmap, style), kCtrlTagInputMeter);
     pGraphics->AttachControl(new NAMMeterControl(outputMeterArea, meterBackgroundBitmap, style), kCtrlTagOutputMeter);
 
-    // Settings/help/about box
-    pGraphics->AttachControl(new NAMCircleButtonControl(
-      settingsButtonArea,
-      [pGraphics](IControl* pCaller) {
-        pGraphics->GetControlWithTag(kCtrlTagSettingsBox)->As<NAMSettingsPageControl>()->HideAnimated(false);
-      },
-      gearSVG));
+    // --- Footer strip (attached before the popovers so they draw on top) ------
+    pGraphics->AttachControl(new NAMStripControl(footerArea, false)); // top hairline
+    {
+      auto sepStyle =
+        DEFAULT_STYLE.WithDrawFrame(false).WithValueText(IText(11.f, PluginColors::TEXT_LO, "Michroma-Regular"));
+      float x = b.L + 12.f;
+      auto place = [&](float w) {
+        IRECT r(x, footerArea.T, x + w, footerArea.B);
+        x += w;
+        return r;
+      };
+      auto sep = [&]() {
+        pGraphics->AttachControl(new IVLabelControl(IRECT(x, footerArea.T, x + 8.f, footerArea.B), "|", sepStyle));
+        x += 8.f;
+      };
 
+      pGraphics->AttachControl(new NAMFooterButtonControl(place(60.f), "TUNER", [pGraphics](IControl*) {
+        pGraphics->GetControlWithTag(kCtrlTagTunerBox)->As<NAMTunerPageControl>()->HideAnimated(false);
+      }));
+      sep();
+      pGraphics->AttachControl(new NAMFooterButtonControl(place(44.f), "TAP", [this, pGraphics](IControl*) {
+        static std::vector<double> taps;
+        const double now =
+          std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (!taps.empty() && (now - taps.back()) > 2.0)
+          taps.clear();
+        taps.push_back(now);
+        if (taps.size() > 5)
+          taps.erase(taps.begin());
+        if (taps.size() >= 2)
+        {
+          double sum = 0.0;
+          for (size_t i = 1; i < taps.size(); i++)
+            sum += taps[i] - taps[i - 1];
+          const double interval = sum / (double)(taps.size() - 1);
+          if (interval > 0.0)
+          {
+            const double bpm = std::round(std::clamp(60.0 / interval, 20.0, 300.0));
+            SendParameterValueFromUI(kBPM, GetParam(kBPM)->ToNormalized(bpm));
+            GetParam(kBPM)->Set(bpm);
+            if (auto* c = pGraphics->GetControlWithTag(kCtrlTagFooterBPM))
+              c->SetDirty(false);
+          }
+        }
+      }));
+      pGraphics->AttachControl(
+        new NAMTempoControl(place(96.f), kBPM, IText(12.f, PluginColors::TEXT_HI, "Roboto-Regular").WithAlign(EAlign::Center)),
+        kCtrlTagFooterBPM);
+      sep();
+      pGraphics->AttachControl(new NAMMetronomeButtonControl(place(112.f), [this](bool on) {
+        bool o = on;
+        SendArbitraryMsgFromUI(kMsgTagMetronome, kNoTag, (int)sizeof(bool), &o);
+      }));
+      sep();
+      pGraphics->AttachControl(new NAMFooterButtonControl(place(84.f), "SETTINGS", [pGraphics](IControl*) {
+        pGraphics->GetControlWithTag(kCtrlTagSettingsBox)->As<NAMSettingsPageControl>()->HideAnimated(false);
+      }));
+
+      pGraphics->AttachControl(new IVLabelControl(
+        IRECT(b.R - 264.f, footerArea.T, b.R - 12.f, footerArea.B), "DEVELOPED BY STOKARSKI",
+        DEFAULT_STYLE.WithDrawFrame(false).WithValueText(
+          IText(10.f, PluginColors::TEXT_LO, "Michroma-Regular").WithAlign(EAlign::Far))));
+    }
+
+    // Settings/help/about box (opened from the footer SETTINGS button)
     pGraphics
       ->AttachControl(new NAMSettingsPageControl(b, backgroundBitmap, inputLevelBackgroundBitmap, switchHandleBitmap,
                                                  crossSVG, style, radioButtonStyle),
                       kCtrlTagSettingsBox)
       ->Hide(true);
+
+    pGraphics->AttachControl(new NAMTunerPageControl(b, crossSVG, style), kCtrlTagTunerBox)->Hide(true);
 
     const auto slimKnobArea = b.GetCentredInside(100.f, NAM_KNOB_HEIGHT + 24.f);
     pGraphics->AttachControl(new NAMSlimOverlayBackdropControl(b, hideSlimOverlay), kCtrlTagSlimOverlayBackdrop)
@@ -377,6 +490,14 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
   // Input is collapsed to mono in preparation for the NAM.
   _ProcessInput(inputs, numFrames, numChannelsExternalIn, numChannelsInternal);
   _ApplyDSPStaging();
+
+  // Feed the tuner from the dry input (only while the tuner popover is open).
+  if (mTunerActive.load(std::memory_order_relaxed) && mInputPointers != nullptr)
+  {
+    mPitchDetector.Push(mInputPointers[0], (int)numFrames);
+    mTunerFreqHz.store(mPitchDetector.GetFrequency(), std::memory_order_relaxed);
+  }
+
   // Gate and tone stack are always on (their UI toggles were removed).
   const bool noiseGateActive = true;
   const bool toneStackActive = true;
@@ -433,10 +554,53 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
   // Let's get outta here
   // This is where we exit mono for whatever the output requires.
   _ProcessOutput(hpfPointers, outputs, numFrames, numChannelsInternal, numChannelsExternalOut);
+
+  // Mute output while tuning, if requested.
+  if (mTunerMuted.load(std::memory_order_relaxed))
+  {
+    for (size_t c = 0; c < numChannelsExternalOut; c++)
+      std::fill(outputs[c], outputs[c] + numFrames, (iplug::sample)0.0);
+  }
   // _ProcessOutput(lpfPointers, outputs, numFrames, numChannelsInternal, numChannelsExternalOut);
   // * Output of input leveling (inputs -> mInputPointers),
   // * Output of output leveling (mOutputPointers -> outputs)
   _UpdateMeters(mInputPointers, outputs, numFrames, numChannelsInternal, numChannelsExternalOut);
+
+  // Metronome: mix a short click on each beat (added after the meters so it
+  // doesn't affect the output meter, and after the mute so it's always heard).
+  const bool metroOn = mMetronomeOn.load(std::memory_order_relaxed);
+  if (metroOn)
+  {
+    constexpr double kTwoPi = 6.283185307179586;
+    const double bpm = std::clamp(GetParam(kBPM)->Value(), 20.0, 300.0);
+    const double samplesPerBeat = sampleRate * 60.0 / bpm;
+    const int clickLen = (int)(sampleRate * 0.04); // 40 ms ping
+    if (!mMetroPrevOn) // just started: fire on the first sample
+    {
+      mMetroPhaseSamples = 0.0;
+      mClickPos = -1;
+    }
+    for (size_t i = 0; i < numFrames; i++)
+    {
+      if (mMetroPhaseSamples <= 0.0)
+      {
+        mClickPos = 0;
+        mMetroPhaseSamples += samplesPerBeat;
+      }
+      double s = 0.0;
+      if (mClickPos >= 0 && mClickPos < clickLen)
+      {
+        const double t = (double)mClickPos / sampleRate;
+        const double env = std::exp(-t * 45.0);
+        s = 0.3 * env * std::sin(kTwoPi * 1000.0 * t);
+        mClickPos++;
+      }
+      for (size_t c = 0; c < numChannelsExternalOut; c++)
+        outputs[c][i] += (iplug::sample)s;
+      mMetroPhaseSamples -= 1.0;
+    }
+  }
+  mMetroPrevOn = metroOn;
 }
 
 void NeuralAmpModeler::OnReset()
@@ -454,6 +618,10 @@ void NeuralAmpModeler::OnReset()
   // If there is a model or IR loaded, they need to be checked for resampling.
   _ResetModelAndIR(sampleRate, GetBlockSize());
   mToneStack->Reset(sampleRate, maxBlockSize);
+  mPitchDetector.Reset(sampleRate);
+  mMetroPhaseSamples = 0.0;
+  mClickPos = -1;
+  mMetroPrevOn = false;
   _UpdateLatency();
 }
 
@@ -461,6 +629,15 @@ void NeuralAmpModeler::OnIdle()
 {
   mInputSender.TransmitData(*this);
   mOutputSender.TransmitData(*this);
+
+  if (mTunerActive.load(std::memory_order_relaxed))
+  {
+    if (auto* pGraphics = GetUI())
+    {
+      if (auto* c = pGraphics->GetControlWithTag(kCtrlTagTunerBox))
+        static_cast<NAMTunerPageControl*>(c)->SetReading(mTunerFreqHz.load(std::memory_order_relaxed));
+    }
+  }
 
   if (mNewModelLoadedInDSP)
   {
@@ -591,6 +768,9 @@ void NeuralAmpModeler::OnParamChangeUI(int paramIdx, EParamSource source)
         pGraphics->ForControlInGroup("AMP_MED", [type](IControl* pControl) { pControl->Hide(type != 1); });
         pGraphics->ForControlInGroup("AMP_MOD", [type](IControl* pControl) { pControl->Hide(type != 2); });
         pGraphics->SetAllControlsDirty();
+        // Remember the user's choice so it persists across relaunches.
+        if (source == kUI)
+          _SaveAmpStylePref(type);
         break;
       }
       default: break;
@@ -604,6 +784,29 @@ bool NeuralAmpModeler::OnMessage(int msgTag, int ctrlTag, int dataSize, const vo
   {
     case kMsgTagClearModel: mShouldRemoveModel = true; return true;
     case kMsgTagClearIR: mShouldRemoveIR = true; return true;
+    case kMsgTagTunerActive:
+    {
+      const bool active = (dataSize >= 1) && (*reinterpret_cast<const bool*>(pData));
+      mTunerActive.store(active, std::memory_order_relaxed);
+      if (!active)
+      {
+        mTunerMuted.store(false, std::memory_order_relaxed);
+        mTunerFreqHz.store(-1.0f, std::memory_order_relaxed);
+      }
+      return true;
+    }
+    case kMsgTagTunerMute:
+    {
+      const bool mute = (dataSize >= 1) && (*reinterpret_cast<const bool*>(pData));
+      mTunerMuted.store(mute, std::memory_order_relaxed);
+      return true;
+    }
+    case kMsgTagMetronome:
+    {
+      const bool on = (dataSize >= 1) && (*reinterpret_cast<const bool*>(pData));
+      mMetronomeOn.store(on, std::memory_order_relaxed);
+      return true;
+    }
     case kMsgTagHighlightColor:
     {
       mHighLightColor.Set((const char*)pData);

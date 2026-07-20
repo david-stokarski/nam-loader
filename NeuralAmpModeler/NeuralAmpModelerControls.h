@@ -3,7 +3,10 @@
 #include <algorithm> // std::min
 #include <cmath> // std::round
 #include <cstdio> // FILE, fclose
+#include <functional> // std::function
 #include <sstream> // std::stringstream
+#include <string>
+#include <vector>
 #include <unordered_map> // std::unordered_map
 #include "IControls.h"
 #include "IPlugPaths.h"
@@ -387,6 +390,19 @@ public:
   {
   }
 
+  // The control spans the whole dropdown field so a click lands anywhere, but
+  // the label is drawn inset (after the leading icon, before the chevron). The
+  // parent field draws the background/icon/chevron, so we paint text only.
+  void Draw(IGraphics& g) override
+  {
+    IBlend blend = GetBlend();
+    const IRECT tr = mRECT.GetReducedFromLeft(34.f).GetReducedFromRight(26.f);
+    g.DrawText(mStyle.labelText, mLabelStr.Get(), tr, &blend);
+  }
+
+  // Whole field is clickable (ignore the vector widget-frac inset).
+  bool IsHit(float x, float y) const override { return mRECT.Contains(x, y); }
+
   void SetLabelAndTooltip(const char* str)
   {
     SetLabelStr(str);
@@ -439,8 +455,8 @@ public:
   NAMFileBrowserControl(const IRECT& bounds, int clearMsgTag, const char* labelStr, const char* fileExtension,
                         IFileDialogCompletionHandlerFunc ch, const IVStyle& style, const ISVG& loadSVG,
                         const ISVG& clearSVG, const ISVG& leftSVG, const ISVG& rightSVG, const IBitmap& bitmap,
-                        const ISVG& globeSVG, const char* getButtonLabel, const char* getButtonURL,
-                        bool compact = false)
+                        const ISVG& globeSVG, const ISVG& leadingSVG, const char* getButtonLabel,
+                        const char* getButtonURL, bool compact = false)
   : IDirBrowseControlBase(bounds, fileExtension, false, false)
   , mClearMsgTag(clearMsgTag)
   , mDefaultLabelStr(labelStr)
@@ -452,6 +468,7 @@ public:
   , mLeftSVG(leftSVG)
   , mRightSVG(rightSVG)
   , mGlobeSVG(globeSVG)
+  , mLeadingSVG(leadingSVG)
   , mGetButtonLabel(getButtonLabel)
   , mGetButtonURL(getButtonURL)
   , mBrowserState(NAMBrowserState::Empty)
@@ -462,18 +479,37 @@ public:
 
   void Draw(IGraphics& g) override
   {
-    // Flat field.
-    g.FillRoundRect(PluginColors::KNOB_RIM, mRECT, 4.0f);
-    g.DrawRoundRect(PluginColors::PANEL_BORDER, mRECT, 4.0f, &mBlend, 1.0f);
-
     if (mCompact)
     {
-      // Draw a small chevron on the right to read as a dropdown.
-      const float cx = mRECT.R - 13.f;
-      const float cy = mRECT.MH();
-      g.DrawLine(PluginColors::TEXT_MID, cx - 4.f, cy - 2.f, cx, cy + 2.5f, &mBlend, 1.4f);
-      g.DrawLine(PluginColors::TEXT_MID, cx + 4.f, cy - 2.f, cx, cy + 2.5f, &mBlend, 1.4f);
+      // Modern combobox: lifted field, leading icon, left-aligned name, chevron.
+      const float r = 7.0f;
+      g.FillRoundRect(PluginColors::PANEL, mRECT, r);
+      g.DrawRoundRect(PluginColors::PANEL_BORDER, mRECT, r, &mBlend, 1.0f);
+
+      // Leading icon (model / IR): sized to the SVG's aspect ratio and centered
+      // vertically so icons of different shapes all sit on the field's midline.
+      const IColor iconCol = PluginColors::TEXT_MID;
+      const float aspect = (mLeadingSVG.H() > 0.f) ? (mLeadingSVG.W() / mLeadingSVG.H()) : 1.f;
+      float iw = 22.f, ih = iw / aspect;
+      if (ih > 14.f)
+      {
+        ih = 14.f;
+        iw = ih * aspect;
+      }
+      const float icx = mRECT.L + 20.f, icy = mRECT.MH();
+      const IRECT iconArea = IRECT(icx - iw * 0.5f, icy - ih * 0.5f, icx + iw * 0.5f, icy + ih * 0.5f);
+      g.DrawSVG(mLeadingSVG, iconArea, &mBlend, nullptr, &iconCol);
+
+      // Chevron on the right.
+      const float cx = mRECT.R - 15.f, cy = mRECT.MH();
+      g.DrawLine(iconCol, cx - 4.f, cy - 2.f, cx, cy + 2.5f, &mBlend, 1.6f);
+      g.DrawLine(iconCol, cx + 4.f, cy - 2.f, cx, cy + 2.5f, &mBlend, 1.6f);
+      return;
     }
+
+    // Flat field (non-compact).
+    g.FillRoundRect(PluginColors::KNOB_RIM, mRECT, 4.0f);
+    g.DrawRoundRect(PluginColors::PANEL_BORDER, mRECT, 4.0f, &mBlend, 1.0f);
   }
 
   void OnPopupMenuSelection(IPopupMenu* pSelectedMenu, int valIdx) override
@@ -573,10 +609,12 @@ public:
 
     if (mCompact)
     {
-      // Dropdown style: just the file-name field (click = load or choose),
-      // with room for a chevron on the right. No load/prev/next/clear/get icons.
-      const IRECT padded = mRECT.GetPadded(-3.f).GetReducedFromLeft(6.f).GetReducedFromRight(20.f);
-      AddChildControl(mFileNameControl = new NAMFileNameControl(padded, mDefaultLabelStr.Get(), mStyle))
+      // Dropdown style: leading icon + left-aligned file name + chevron. The
+      // name control covers the whole field so a click anywhere opens the
+      // chooser; it insets its own label. No load/prev/next/clear/get icons.
+      const IVStyle nameStyle =
+        mStyle.WithLabelText(mStyle.labelText.WithAlign(EAlign::Near).WithVAlign(EVAlign::Middle));
+      AddChildControl(mFileNameControl = new NAMFileNameControl(mRECT, mDefaultLabelStr.Get(), nameStyle))
         ->SetAnimationEndActionFunction(chooseFileFunc);
       mClearButton = nullptr;
       mGetButton = nullptr;
@@ -692,7 +730,7 @@ private:
   NAMFileNameControl* mFileNameControl = nullptr;
   IVStyle mStyle;
   IBitmap mBitmap;
-  ISVG mLoadSVG, mClearSVG, mLeftSVG, mRightSVG, mGlobeSVG;
+  ISVG mLoadSVG, mClearSVG, mLeftSVG, mRightSVG, mGlobeSVG, mLeadingSVG;
   int mClearMsgTag;
 
   // new members for the "Get" button
@@ -1360,4 +1398,593 @@ private:
     IVStyle mStyle;
     IText mText;
   };
+};
+
+// ===========================================================================
+// Footer
+// ===========================================================================
+
+/// A flat text button used in the bottom footer strip.
+class NAMFooterButtonControl : public IControl
+{
+public:
+  NAMFooterButtonControl(const IRECT& bounds, const char* label, IActionFunction af)
+  : IControl(bounds, af)
+  , mLabel(label)
+  {
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    if (mMouseIsOver && !mDisabled)
+      g.FillRoundRect(PluginColors::MOUSEOVER, mRECT.GetPadded(-1.f), 3.f);
+    const IColor col = mDisabled ? PluginColors::TEXT_LO : (mMouseIsOver ? PluginColors::TEXT_HI : PluginColors::TEXT_MID);
+    g.DrawText(IText(11.f, col, "Michroma-Regular").WithAlign(EAlign::Center), mLabel.Get(), mRECT);
+  }
+
+  void OnMouseDown(float x, float y, const IMouseMod& mod) override
+  {
+    if (!mDisabled)
+    {
+      if (auto af = GetActionFunction())
+        af(this);
+    }
+  }
+
+  void SetLabel(const char* l)
+  {
+    mLabel.Set(l);
+    SetDirty(false);
+  }
+
+private:
+  WDL_String mLabel;
+};
+
+/// Footer tempo readout ("120.0 BPM") bound to the tempo param. Click top/bottom
+/// half or scroll to nudge; TAP sets it from the outside.
+class NAMTempoControl : public IControl
+{
+public:
+  NAMTempoControl(const IRECT& bounds, int paramIdx, const IText& text)
+  : IControl(bounds, paramIdx)
+  , mText(text)
+  {
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    if (mMouseIsOver)
+      g.FillRoundRect(PluginColors::MOUSEOVER, mRECT, 3.f);
+    WDL_String s;
+    s.SetFormatted(32, "%.0f BPM", std::round(GetParam()->Value()));
+    g.DrawText(mText, s.Get(), mRECT.GetReducedFromRight(12.f));
+    // Up/down chevrons at the right edge.
+    const float cx = mRECT.R - 7.f, cy = mRECT.MH();
+    g.DrawLine(PluginColors::TEXT_MID, cx - 3.f, cy - 2.f, cx, cy - 5.f, &mBlend, 1.2f);
+    g.DrawLine(PluginColors::TEXT_MID, cx + 3.f, cy - 2.f, cx, cy - 5.f, &mBlend, 1.2f);
+    g.DrawLine(PluginColors::TEXT_MID, cx - 3.f, cy + 2.f, cx, cy + 5.f, &mBlend, 1.2f);
+    g.DrawLine(PluginColors::TEXT_MID, cx + 3.f, cy + 2.f, cx, cy + 5.f, &mBlend, 1.2f);
+  }
+
+  void OnMouseDown(float x, float y, const IMouseMod& mod) override { Step(y < mRECT.MH() ? 1.0 : -1.0); }
+  void OnMouseWheel(float x, float y, const IMouseMod& mod, float d) override { Step(d > 0.f ? 1.0 : -1.0); }
+
+  void Step(double bpmDelta)
+  {
+    const IParam* p = GetParam();
+    const double v = std::round(p->Value() + bpmDelta);
+    SetValue(p->ToNormalized(v));
+    SetDirty(true);
+  }
+
+private:
+  IText mText;
+};
+
+/// Footer metronome button: "METRONOME" plus a play/stop glyph. Toggles and
+/// tints green (playing). Inert audio is handled by the DSP.
+class NAMMetronomeButtonControl : public IControl
+{
+public:
+  NAMMetronomeButtonControl(const IRECT& bounds, std::function<void(bool)> onChange)
+  : IControl(bounds)
+  , mOnChange(std::move(onChange))
+  {
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    if (mMouseIsOver)
+      g.FillRoundRect(PluginColors::MOUSEOVER, mRECT.GetPadded(-1.f), 3.f);
+    const IColor green(255, 118, 226, 150);
+    const IColor col = mOn ? green : (mMouseIsOver ? PluginColors::TEXT_HI : PluginColors::TEXT_MID);
+    g.DrawText(IText(11.f, col, "Michroma-Regular").WithAlign(EAlign::Center), "METRONOME",
+               mRECT.GetReducedFromRight(18.f));
+    const float gx = mRECT.R - 12.f, gy = mRECT.MH();
+    if (mOn)
+    {
+      g.FillRect(col, IRECT(gx - 4.f, gy - 4.f, gx + 4.f, gy + 4.f), &mBlend);
+    }
+    else
+    {
+      g.PathClear();
+      g.PathMoveTo(gx - 3.f, gy - 5.f);
+      g.PathLineTo(gx + 5.f, gy);
+      g.PathLineTo(gx - 3.f, gy + 5.f);
+      g.PathClose();
+      g.PathFill(col, IFillOptions(), &mBlend);
+    }
+  }
+
+  void OnMouseDown(float x, float y, const IMouseMod& mod) override
+  {
+    mOn = !mOn;
+    if (mOnChange)
+      mOnChange(mOn);
+    SetDirty(false);
+  }
+
+private:
+  bool mOn = false;
+  std::function<void(bool)> mOnChange;
+};
+
+// ===========================================================================
+// Tuner
+// ===========================================================================
+
+/// Horizontal N-segment toggle (e.g. Cents | Hz).
+class NAMSegmentedControl : public IControl
+{
+public:
+  NAMSegmentedControl(const IRECT& bounds, std::vector<std::string> opts, int initial, std::function<void(int)> onChange)
+  : IControl(bounds)
+  , mOpts(std::move(opts))
+  , mSel(initial)
+  , mOnChange(std::move(onChange))
+  {
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    g.FillRoundRect(PluginColors::KNOB_RIM, mRECT, 5.f);
+    g.DrawRoundRect(PluginColors::PANEL_BORDER, mRECT, 5.f, &mBlend, 1.f);
+    const int n = (int)mOpts.size();
+    for (int i = 0; i < n; i++)
+    {
+      const IRECT seg = mRECT.GetGridCell(i, 1, n).GetPadded(-3.f);
+      if (i == mSel)
+        g.FillRoundRect(PluginColors::ACCENT_DIM, seg, 4.f);
+      const IColor col = (i == mSel) ? PluginColors::CHROME : PluginColors::TEXT_MID;
+      g.DrawText(IText(13.f, col, "Roboto-Regular"), mOpts[i].c_str(), seg);
+    }
+  }
+
+  void OnMouseDown(float x, float y, const IMouseMod& mod) override
+  {
+    const int n = (int)mOpts.size();
+    for (int i = 0; i < n; i++)
+    {
+      if (mRECT.GetGridCell(i, 1, n).Contains(x, y))
+      {
+        mSel = i;
+        if (mOnChange)
+          mOnChange(i);
+        SetDirty(false);
+        break;
+      }
+    }
+  }
+
+private:
+  std::vector<std::string> mOpts;
+  int mSel;
+  std::function<void(int)> mOnChange;
+};
+
+/// A paramless pill toggle (used for "Live Tuner").
+class NAMBoolToggleControl : public IControl
+{
+public:
+  NAMBoolToggleControl(const IRECT& bounds, bool init, std::function<void(bool)> onChange)
+  : IControl(bounds)
+  , mOn(init)
+  , mOnChange(std::move(onChange))
+  {
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    const float h = std::min(mRECT.H(), 22.f);
+    const float w = std::min(mRECT.W(), h * 1.9f);
+    const IRECT track = mRECT.GetCentredInside(w, h);
+    const float r = h * 0.5f;
+    const IColor tc = mOn ? PluginColors::ACCENT_DIM : PluginColors::KNOB_RIM;
+    g.FillRoundRect(tc, track, r, &mBlend);
+    if (!mOn)
+      g.DrawRoundRect(PluginColors::PANEL_BORDER, track, r, &mBlend, 1.f);
+    if (mMouseIsOver)
+      g.FillRoundRect(PluginColors::MOUSEOVER, track, r, &mBlend);
+    const float knobR = r - 2.5f;
+    const float cy = track.MH();
+    const float cx = mOn ? (track.R - r) : (track.L + r);
+    g.FillCircle(mOn ? PluginColors::TEXT_HI : PluginColors::TEXT_MID, cx, cy, knobR, &mBlend);
+  }
+
+  void OnMouseDown(float x, float y, const IMouseMod& mod) override
+  {
+    mOn = !mOn;
+    if (mOnChange)
+      mOnChange(mOn);
+    SetDirty(false);
+  }
+
+private:
+  bool mOn;
+  std::function<void(bool)> mOnChange;
+};
+
+/// Red mute toggle in the tuner header (mutes the plugin output while tuning).
+class NAMTunerMuteControl : public IControl
+{
+public:
+  NAMTunerMuteControl(const IRECT& bounds, std::function<void(bool)> onChange)
+  : IControl(bounds)
+  , mOnChange(std::move(onChange))
+  {
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    const IColor red(255, 224, 49, 49);
+    const IColor bg = mMuted ? red : PluginColors::KNOB_RIM;
+    g.FillRoundRect(bg, mRECT, 6.f);
+    if (!mMuted)
+      g.DrawRoundRect(PluginColors::PANEL_BORDER, mRECT, 6.f, &mBlend, 1.f);
+    if (mMouseIsOver)
+      g.FillRoundRect(PluginColors::MOUSEOVER, mRECT, 6.f, &mBlend);
+
+    const IColor ic = mMuted ? COLOR_WHITE : red;
+    const IRECT b = mRECT.GetCentredInside(22.f, 22.f);
+    const float by = b.MH();
+    const float bx = b.L + 2.f;
+    // Speaker body + cone.
+    g.FillRect(ic, IRECT(bx, by - 4.f, bx + 5.f, by + 4.f), &mBlend);
+    g.PathClear();
+    g.PathMoveTo(bx + 5.f, by - 4.f);
+    g.PathLineTo(bx + 11.f, by - 9.f);
+    g.PathLineTo(bx + 11.f, by + 9.f);
+    g.PathLineTo(bx + 5.f, by + 4.f);
+    g.PathClose();
+    g.PathFill(ic, IFillOptions(), &mBlend);
+    // Slash.
+    g.DrawLine(ic, b.L + 1.f, b.T + 1.f, b.R - 1.f, b.B - 1.f, &mBlend, 2.2f);
+  }
+
+  void OnMouseDown(float x, float y, const IMouseMod& mod) override
+  {
+    mMuted = !mMuted;
+    if (mOnChange)
+      mOnChange(mMuted);
+    SetDirty(false);
+  }
+
+  void SetMuted(bool m)
+  {
+    mMuted = m;
+    SetDirty(false);
+  }
+
+private:
+  bool mMuted = false;
+  std::function<void(bool)> mOnChange;
+};
+
+/// Reference-pitch stepper ("440.0"), 400–480 Hz.
+class NAMTunerRefControl : public IControl
+{
+public:
+  NAMTunerRefControl(const IRECT& bounds, float init, std::function<void(float)> onChange, const IText& text)
+  : IControl(bounds)
+  , mRef(init)
+  , mOnChange(std::move(onChange))
+  , mText(text)
+  {
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    g.FillRoundRect(PluginColors::KNOB_RIM, mRECT, 5.f);
+    g.DrawRoundRect(PluginColors::PANEL_BORDER, mRECT, 5.f, &mBlend, 1.f);
+    if (mMouseIsOver)
+      g.FillRoundRect(PluginColors::MOUSEOVER, mRECT, 5.f, &mBlend);
+    WDL_String s;
+    s.SetFormatted(16, "%.1f", mRef);
+    // Center the value in the space to the left of the chevrons.
+    const IRECT textArea = mRECT.GetReducedFromRight(18.f).GetReducedFromLeft(6.f);
+    g.DrawText(mText.WithAlign(EAlign::Center).WithVAlign(EVAlign::Middle), s.Get(), textArea);
+    const float cx = mRECT.R - 9.f, cy = mRECT.MH();
+    g.DrawLine(PluginColors::TEXT_MID, cx - 3.f, cy - 2.f, cx, cy - 5.f, &mBlend, 1.2f);
+    g.DrawLine(PluginColors::TEXT_MID, cx + 3.f, cy - 2.f, cx, cy - 5.f, &mBlend, 1.2f);
+    g.DrawLine(PluginColors::TEXT_MID, cx - 3.f, cy + 2.f, cx, cy + 5.f, &mBlend, 1.2f);
+    g.DrawLine(PluginColors::TEXT_MID, cx + 3.f, cy + 2.f, cx, cy + 5.f, &mBlend, 1.2f);
+  }
+
+  void OnMouseDown(float x, float y, const IMouseMod& mod) override { Step(y < mRECT.MH() ? 1.f : -1.f); }
+  void OnMouseWheel(float x, float y, const IMouseMod& mod, float d) override { Step(d > 0.f ? 0.5f : -0.5f); }
+
+  void Step(float delta)
+  {
+    mRef = std::clamp(mRef + delta, 400.f, 480.f);
+    if (mOnChange)
+      mOnChange(mRef);
+    SetDirty(false);
+  }
+
+private:
+  float mRef;
+  std::function<void(float)> mOnChange;
+  IText mText;
+};
+
+/// The Tuner popover — a centered card over a dimmed backdrop (same interaction
+/// model as the settings popover). Draws a cents scale, a moving needle that
+/// turns green in tune, and the detected note; hosts the mute/close buttons and
+/// the Cents/Hz, Live Tuner and reference controls.
+class NAMTunerPageControl : public IContainerBase
+{
+public:
+  NAMTunerPageControl(const IRECT& bounds, ISVG closeSVG, const IVStyle& style)
+  : IContainerBase(bounds)
+  , mStyle(style)
+  , mCloseSVG(closeSVG)
+  {
+    mIgnoreMouse = false;
+  }
+
+  IRECT PopoverRect() const { return GetRECT().GetCentredInside(kTW, kTH); }
+
+  // Called from OnIdle with the latest detected pitch (Hz, or <=0 for none).
+  void SetReading(float hz)
+  {
+    mHasSignal = hz > 0.f;
+    if (mHasSignal)
+    {
+      mFreqHz = hz;
+      const double midi = 69.0 + 12.0 * std::log2((double)hz / (double)mReferenceHz);
+      const int nearest = (int)std::lround(midi);
+      mCents = (float)((midi - (double)nearest) * 100.0);
+      mNoteIndex = ((nearest % 12) + 12) % 12;
+      mHaveNote = true;
+    }
+    SetDirty(false);
+  }
+
+  bool OnKeyDown(float x, float y, const IKeyPress& key) override
+  {
+    if (key.VK == kVK_ESCAPE)
+    {
+      HideAnimated(true);
+      return true;
+    }
+    return false;
+  }
+
+  void OnMouseDown(float x, float y, const IMouseMod& mod) override
+  {
+    if (!PopoverRect().Contains(x, y))
+      HideAnimated(true);
+  }
+
+  void HideAnimated(bool hide)
+  {
+    mWillHide = hide;
+
+    // Tell the DSP whether the tuner is active (so detection only runs when open).
+    bool active = !hide;
+    GetDelegate()->SendArbitraryMsgFromUI(kMsgTagTunerActive, kNoTag, (int)sizeof(bool), &active);
+    if (hide)
+    {
+      if (mMuteControl)
+        mMuteControl->SetMuted(false); // DSP unmutes on close
+      mHaveNote = false;
+      mHasSignal = false;
+    }
+
+    if (hide == false)
+    {
+      mHide = false;
+    }
+    else
+    {
+      ForAllChildrenFunc([hide](int childIdx, IControl* pChild) { pChild->Hide(hide); });
+    }
+
+    SetAnimation(
+      [&](IControl* pCaller) {
+        auto progress = static_cast<float>(pCaller->GetAnimationProgress());
+        if (mWillHide)
+          SetBlend(IBlend(EBlend::Default, 1.0f - progress));
+        else
+          SetBlend(IBlend(EBlend::Default, progress));
+        if (progress > 1.0f)
+        {
+          pCaller->OnEndAnimation();
+          IContainerBase::Hide(mWillHide);
+          GetUI()->SetAllControlsDirty();
+          return;
+        }
+      },
+      mAnimationTime);
+
+    SetDirty(true);
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    g.FillRect(COLOR_BLACK.WithOpacity(0.55f), mRECT, &mBlend);
+
+    const IRECT card = PopoverRect();
+    g.FillRoundRect(COLOR_BLACK.WithOpacity(0.30f), card.GetPadded(3.f).GetVShifted(5.f), 14.f, &mBlend);
+    g.FillRoundRect(PluginColors::PANEL, card, 14.f, &mBlend);
+    g.DrawRoundRect(PluginColors::PANEL_BORDER, card, 14.f, &mBlend, 1.f);
+
+    const IRECT inner = card.GetPadded(-kPad);
+
+    // Title + header divider.
+    const IRECT titleRow = inner.GetFromTop(kTitleH);
+    g.DrawText(IText(19.f, PluginColors::TEXT_HI, "Michroma-Regular").WithAlign(EAlign::Near).WithVAlign(EVAlign::Middle),
+               "Tuner", titleRow);
+    const float dyTitle = inner.T + kTitleH + 8.f;
+    g.DrawLine(PluginColors::HAIRLINE, inner.L, dyTitle, inner.R, dyTitle, &mBlend, 1.f);
+
+    const IColor green(255, 118, 226, 150);
+    const bool inTune = mHaveNote && mHasSignal && std::fabs(mCents) <= kInTuneCents;
+
+    // --- Cents scale row ---
+    const IRECT scaleRow = IRECT(inner.L, dyTitle + 14.f, inner.R, dyTitle + 44.f);
+    const IText scaleTxt = IText(15.f, PluginColors::TEXT_MID, "Roboto-Regular");
+    g.DrawText(scaleTxt.WithAlign(EAlign::Near), "-50", scaleRow);
+    g.DrawText(scaleTxt.WithAlign(EAlign::Far), "+50", scaleRow);
+    // Center readout: cents (Cents mode) or frequency (Hz mode).
+    WDL_String mid;
+    if (!mHaveNote)
+      mid.Set("--");
+    else if (mShowHz)
+      mid.SetFormatted(16, "%.1f Hz", mFreqHz);
+    else
+      mid.SetFormatted(16, "%+.1f", mCents);
+    g.DrawText(IText(16.f, mHasSignal ? PluginColors::TEXT_HI : PluginColors::TEXT_MID, "Roboto-Regular"), mid.Get(),
+               scaleRow);
+
+    // Direction arrows: flat -> tune up (left ">"), sharp -> tune down (right "<").
+    const bool flat = mHaveNote && mHasSignal && mCents < -kInTuneCents;
+    const bool sharp = mHaveNote && mHasSignal && mCents > kInTuneCents;
+    {
+      const float ay = scaleRow.MH();
+      const float lx = inner.L + inner.W() * 0.30f;
+      const float rx = inner.L + inner.W() * 0.70f;
+      const IColor lc = flat ? green : PluginColors::HAIRLINE;
+      const IColor rc = sharp ? green : PluginColors::HAIRLINE;
+      g.DrawLine(lc, lx - 4.f, ay - 5.f, lx + 3.f, ay, &mBlend, 2.4f);
+      g.DrawLine(lc, lx - 4.f, ay + 5.f, lx + 3.f, ay, &mBlend, 2.4f);
+      g.DrawLine(rc, rx + 4.f, ay - 5.f, rx - 3.f, ay, &mBlend, 2.4f);
+      g.DrawLine(rc, rx + 4.f, ay + 5.f, rx - 3.f, ay, &mBlend, 2.4f);
+    }
+
+    // --- Needle: a fixed center target with a moving note indicator ---
+    const float lineY = inner.T + inner.H() * 0.46f;
+    g.DrawLine(PluginColors::TEXT_MID.WithOpacity(0.7f), inner.L + 6.f, lineY, inner.R - 6.f, lineY, &mBlend, 1.5f);
+    const float half = (inner.W() * 0.5f) - 40.f;
+    const float cx = inner.MW();
+    const float cents = mHaveNote ? std::clamp(mCents, -50.f, 50.f) : 0.f;
+    const float dotR = 34.f;
+
+    // Moving indicator (vertical needle) shows how far off the note is. Drawn
+    // behind the center target so it slides "into" it as you reach pitch.
+    if (mHaveNote && !inTune)
+    {
+      const float nx = cx + (cents / 50.f) * half;
+      const IColor nc = mHasSignal ? COLOR_WHITE : PluginColors::KNOB_RIM;
+      g.FillRoundRect(nc, IRECT(nx - 3.f, lineY - 26.f, nx + 3.f, lineY + 26.f), 3.f, &mBlend);
+    }
+
+    // Fixed center target — always dead center; lights green when in tune.
+    g.FillCircle(PluginColors::CHROME, cx, lineY, dotR, &mBlend);
+    g.DrawCircle(inTune ? green : COLOR_WHITE, cx, lineY, dotR, &mBlend, 3.f);
+    if (inTune)
+      g.FillCircle(green, cx, lineY, dotR * 0.62f, &mBlend);
+    else if (mHasSignal)
+      g.FillCircle(PluginColors::ACCENT_DIM.WithOpacity(0.35f), cx, lineY, dotR * 0.26f, &mBlend);
+
+    // --- Note names (prev / current / next) ---
+    static const char* kNotes[12] = {"C", "C#/Db", "D", "D#/Eb", "E", "F", "F#/Gb", "G", "G#/Ab", "A", "A#/Bb", "B"};
+    const IRECT noteRow = IRECT(inner.L, inner.B - kBottomH - 64.f, inner.R, inner.B - kBottomH - 8.f);
+    if (mHaveNote)
+    {
+      const int pc = mNoteIndex;
+      const int prev = (pc + 11) % 12;
+      const int next = (pc + 1) % 12;
+      const IColor dim = PluginColors::TEXT_LO;
+      g.DrawText(IText(24.f, dim, "Roboto-Regular").WithAlign(EAlign::Near), kNotes[prev], noteRow.GetHPadded(-6.f));
+      g.DrawText(IText(24.f, dim, "Roboto-Regular").WithAlign(EAlign::Far), kNotes[next], noteRow.GetHPadded(-6.f));
+      g.DrawText(IText(40.f, mHasSignal ? PluginColors::TEXT_HI : PluginColors::TEXT_MID, "Roboto-Regular")
+                   .WithAlign(EAlign::Center),
+                 kNotes[pc], noteRow);
+    }
+    else
+    {
+      g.DrawText(IText(20.f, PluginColors::TEXT_MID, "Roboto-Regular").WithAlign(EAlign::Center),
+                 "Play a note to tune", noteRow);
+    }
+  }
+
+  void OnAttached() override
+  {
+    const IRECT card = PopoverRect();
+    const IRECT inner = card.GetPadded(-kPad);
+    const IText valText = IText(15.f, PluginColors::TEXT_HI, "Roboto-Regular");
+
+    // Header buttons: close (far right), mute (to its left).
+    const IRECT titleRow = inner.GetFromTop(kTitleH);
+    auto closeAction = [](IControl* pCaller) {
+      static_cast<NAMTunerPageControl*>(pCaller->GetParent())->HideAnimated(true);
+    };
+    AddChildControl(new NAMSquareButtonControl(titleRow.GetFromRight(22.f).GetCentredInside(18.f), closeAction, mCloseSVG));
+
+    const IRECT muteArea = titleRow.GetFromRight(22.f + 8.f + 44.f).GetFromLeft(44.f).GetCentredInside(44.f, 34.f);
+    mMuteControl = new NAMTunerMuteControl(muteArea, [this](bool muted) {
+      bool m = muted;
+      GetDelegate()->SendArbitraryMsgFromUI(kMsgTagTunerMute, kNoTag, (int)sizeof(bool), &m);
+    });
+    AddChildControl(mMuteControl);
+
+    // Bottom row: Cents/Hz toggle (left), Live Tuner switch + label (center), reference (right).
+    const IRECT bottom = inner.GetFromBottom(kBottomH);
+    const IRECT segArea = bottom.GetFromLeft(120.f).GetCentredInside(120.f, 34.f);
+    AddChildControl(new NAMSegmentedControl(segArea, {"Cents", "Hz"}, 0, [this](int idx) {
+      mShowHz = (idx == 1);
+      SetDirty(false);
+    }));
+
+    const IRECT refArea = bottom.GetFromRight(96.f).GetCentredInside(96.f, 34.f);
+    AddChildControl(new NAMTunerRefControl(
+      refArea, mReferenceHz, [this](float hz) { mReferenceHz = hz; }, valText.WithAlign(EAlign::Near)));
+
+    // Live Tuner switch + label, centered.
+    const IRECT liveArea = bottom.GetCentredInside(190.f, 34.f);
+    AddChildControl(new NAMBoolToggleControl(liveArea.GetFromLeft(52.f), mLiveMode, [this](bool on) { mLiveMode = on; }));
+    AddChildControl(new IVLabelControl(liveArea.GetReducedFromLeft(60.f),
+                                       "Live Tuner",
+                                       DEFAULT_STYLE.WithDrawFrame(false).WithValueText(
+                                         IText(14.f, PluginColors::TEXT_MID, "Roboto-Regular").WithAlign(EAlign::Near))));
+
+    OnResize();
+  }
+
+private:
+  static constexpr float kTW = 640.f;
+  static constexpr float kTH = 380.f;
+  static constexpr float kPad = 24.f;
+  static constexpr float kTitleH = 34.f;
+  static constexpr float kBottomH = 40.f;
+  static constexpr float kInTuneCents = 5.f;
+
+  IVStyle mStyle;
+  ISVG mCloseSVG;
+  int mAnimationTime = 200;
+  bool mWillHide = false;
+
+  NAMTunerMuteControl* mMuteControl = nullptr;
+
+  // Tuner reading / state.
+  bool mHasSignal = false; // a pitch is currently present
+  bool mHaveNote = false; // we have shown at least one note (persists on silence)
+  float mFreqHz = 0.f;
+  float mCents = 0.f;
+  int mNoteIndex = 9; // A
+  float mReferenceHz = 440.f;
+  bool mShowHz = false;
+  bool mLiveMode = false;
 };
